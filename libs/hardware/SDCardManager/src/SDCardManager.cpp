@@ -261,17 +261,24 @@ bool SDCardManager::removeDir(const char* path) {
     file.getName(name, sizeof(name));
     filePath += name;
 
-    if (file.isDirectory()) {
+    const bool isDirectory = file.isDirectory();
+    // Close the enumerated entry before deleting it.  SdFat cannot reliably
+    // unlink an entry while another FsFile still owns that directory record.
+    file.close();
+    if (isDirectory) {
       if (!removeDir(filePath.c_str())) {
+        dir.close();
         return false;
       }
     } else {
       if (!sd.remove(filePath.c_str())) {
+        dir.close();
         return false;
       }
     }
     file = dir.openNextFile();
   }
 
+  dir.close();
   return sd.rmdir(path);
 }

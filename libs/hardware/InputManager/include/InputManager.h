@@ -110,7 +110,11 @@ class InputManager {
   static const int ADC_RANGES_2[];
 
   static constexpr int ADC_NO_BUTTON = 3900;
-  static constexpr unsigned long DEBOUNCE_DELAY = 5;
+  // The X4 front controls share an ADC ladder. Five milliseconds was short
+  // enough for a single mechanical transition (and display-current noise) to
+  // settle into two valid edges. Twenty milliseconds still feels immediate
+  // while making one physical press produce one debounced event.
+  static constexpr unsigned long DEBOUNCE_DELAY = 20;
 
   static const char* BUTTON_NAMES[];
 };

@@ -20,8 +20,8 @@
 #define CMD_SET_RAM_Y_COUNTER 0x4F  // Set RAM Y address counter
 #define CMD_WRITE_RAM_BW 0x24       // Write to BW RAM (current frame)
 #define CMD_WRITE_RAM_RED 0x26      // Write to RED RAM (used for fast refresh)
-#define CMD_AUTO_WRITE_BW_RAM 0x46  // Auto write BW RAM
-#define CMD_AUTO_WRITE_RED_RAM 0x47 // Auto write RED RAM
+#define CMD_AUTO_WRITE_RED_RAM 0x46 // Auto write RED RAM
+#define CMD_AUTO_WRITE_BW_RAM 0x47  // Auto write BW RAM
 
 // Display update and refresh
 #define CMD_DISPLAY_UPDATE_CTRL1 0x21 // Display update control 1
@@ -397,14 +397,24 @@ void EInkDisplay::setDisplayX3() {
 }
 
 void EInkDisplay::requestResync(uint8_t settlePasses) {
-  _x3ForceFullSyncNext = _x3Mode;
-  _x3ForcedConditionPassesNext = _x3Mode ? settlePasses : 0;
+  if (_x3Mode) {
+    _x3ForceFullSyncNext = true;
+    _x3ForcedConditionPassesNext = settlePasses;
+  } else {
+    _x4ForceFullSyncNext = true;
+  }
 }
 
 void EInkDisplay::skipInitialResync() {
-  if (!_x3Mode) return;
-  _x3InitialFullSyncsRemaining = 0;
-  _x3RedRamSynced = true;
+  if (_x3Mode) {
+    _x3InitialFullSyncsRemaining = 0;
+    _x3RedRamSynced = true;
+  } else {
+    // A seamless restart still needs one fast-full update because begin()
+    // resets the controller RAM to white while the physical panel retains the
+    // old frame. It skips only the slower quality-full request.
+    _x4ForceFullSyncNext = false;
+  }
 }
 
 // Factory LUT extracted from firmware V3.1.9_CH_X4_0117.bin by CrazyCoder.
@@ -507,6 +517,8 @@ void EInkDisplay::begin() {
   _x3InitialFullSyncsRemaining = _x3Mode ? 2 : 0;
   _x3ForceFullSyncNext = false;
   _x3ForcedConditionPassesNext = 0;
+  _x4FirstUpdate = true;
+  _x4ForceFullSyncNext = false;
   _x3GrayState = {};
 #ifdef EINK_DISPLAY_SINGLE_BUFFER_MODE
   if (Serial)
@@ -862,7 +874,10 @@ void EInkDisplay::initDisplayController() {
   sendData(0xC7);
   sendData(0xC3);
   sendData(0xC0);
-  sendData(0x40);
+  // Good Display's GDEQ0426T82 reference sequence uses 0x80 here.
+  // 0x40 under-drives the final booster phase and leaves weakly moved pigment
+  // behind, which becomes severe all-screen ghosting after repeated updates.
+  sendData(0x80);
 
   // Driver output control: set display height and scan direction
   sendCommand(CMD_DRIVER_OUTPUT_CONTROL);
@@ -1396,11 +1411,15 @@ void EInkDisplay::cleanupGrayscaleBuffers(const uint8_t *bwBuffer) {
 #endif
 
 void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
-  if (!isScreenOn && !turnOffScreen) {
-    // Waking the panel from off: force HALF refresh so the wake transition
-    // gets a stronger waveform than a fast differential, matching the X4
-    // policy. Applies to both X4 and X3.
-    mode = HALF_REFRESH;
+  if (!_x3Mode) {
+    if (_x4ForceFullSyncNext) {
+      mode = FULL_REFRESH;
+    } else if (_x4FirstUpdate && mode == FAST_REFRESH) {
+      // begin() clears the controller's two RAM planes, not the retained
+      // physical panel. The first differential update therefore has no valid
+      // previous frame and must use the fast-full waveform once.
+      mode = HALF_REFRESH;
+    }
   }
 
   // If currently in grayscale mode, revert first to black/white
@@ -1604,12 +1623,17 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
   refreshDisplay(mode, turnOffScreen);
 
 #ifdef EINK_DISPLAY_SINGLE_BUFFER_MODE
-  // In single buffer mode always sync RED RAM after refresh to prepare for next
-  // fast refresh This ensures RED contains the currently displayed frame for
-  // differential comparison
+  // Match the stock X4/FreeInk pipeline: after activation, explicitly seed
+  // both controller planes with the completed frame. RED is the authoritative
+  // "previous frame" for the next differential update; rewriting BW too avoids
+  // relying on controller RAM surviving the waveform unchanged.
   setRamArea(0, 0, displayWidth, displayHeight);
+  writeRamBuffer(CMD_WRITE_RAM_BW, frameBuffer, bufferSize);
   writeRamBuffer(CMD_WRITE_RAM_RED, frameBuffer, bufferSize);
 #endif
+
+  _x4FirstUpdate = false;
+  _x4ForceFullSyncNext = false;
 }
 
 // EXPERIMENTAL: Windowed update support
@@ -1706,8 +1730,10 @@ void EInkDisplay::displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
   refreshDisplay(FAST_REFRESH, turnOffScreen);
 
 #ifdef EINK_DISPLAY_SINGLE_BUFFER_MODE
-  // Post-refresh: Sync RED RAM with current window (for next fast refresh)
+  // Post-refresh: keep both controller planes matched for the next window or
+  // full-frame differential update.
   setRamArea(x, y, w, h);
+  writeRamBuffer(CMD_WRITE_RAM_BW, windowBuffer.data(), windowBufferSize);
   writeRamBuffer(CMD_WRITE_RAM_RED, windowBuffer.data(), windowBufferSize);
 #endif
 
@@ -1786,6 +1812,7 @@ void EInkDisplay::displayGrayBuffer(const bool turnOffScreen,
     // (BYPASS_RED) which would ignore RED RAM and break 4-level grayscale.
     sendCommand(CMD_DISPLAY_UPDATE_CTRL1);
     sendData(CTRL1_NORMAL); // 0x00
+    sendData(0x00);         // single-chip application
     // 0xC7 = CLOCK_ON(0x80) + ANALOG_ON(0x40) + DISPLAY_START(0x04) +
     //        ANALOG_OFF(0x02) + CLOCK_OFF(0x01) — full self-contained power
     //        cycle.
@@ -1813,43 +1840,33 @@ void EInkDisplay::refreshDisplay(const RefreshMode mode,
   sendData((mode == FAST_REFRESH)
                ? CTRL1_NORMAL
                : CTRL1_BYPASS_RED); // Configure buffer comparison mode
+  // GDEQ0426T82 requires the second control byte. Omitting it leaves the
+  // source-driver mode dependent on stale controller state.
+  sendData(0x00); // single-chip application
 
-  // best guess at display mode bits:
-  // bit | hex | name                    | effect
-  // ----+-----+--------------------------+-------------------------------------------
-  // 7   | 80  | CLOCK_ON                | Start internal oscillator
-  // 6   | 40  | ANALOG_ON               | Enable analog power rails (VGH/VGL
-  // drivers) 5   | 20  | TEMP_LOAD               | Load temperature (internal
-  // or I2C) 4   | 10  | LUT_LOAD                | Load waveform LUT 3   | 08  |
-  // MODE_SELECT             | Mode 1/2 2   | 04  | DISPLAY_START           |
-  // Run display 1   | 02  | ANALOG_OFF_PHASE        | Shutdown step 1
-  // (undocumented) 0   | 01  | CLOCK_OFF               | Disable internal
-  // oscillator
-
-  // Select appropriate display mode based on refresh type
-  uint8_t displayMode = 0x00;
-
-  // Enable counter and analog if not already on
-  if (!isScreenOn) {
-    isScreenOn = true;
-    displayMode |= 0xC0; // Set CLOCK_ON and ANALOG_ON bits
-  }
-
-  // Turn off screen if requested
-  if (turnOffScreen) {
-    isScreenOn = false;
-    displayMode |= 0x03; // Set ANALOG_OFF_PHASE and CLOCK_OFF bits
-  }
-
+  // Use the panel vendor's complete update sequences rather than composing
+  // guessed bitfields. FULL/HALF are self-contained and power down at the end;
+  // FAST is the differential partial waveform and leaves analog power on.
+  uint8_t displayMode;
   if (mode == FULL_REFRESH) {
-    displayMode |= 0x34;
+    displayMode = 0xF7;
+    isScreenOn = false;
   } else if (mode == HALF_REFRESH) {
-    // Write high temp to the register for a faster refresh
+    // Vendor fast-full update: complete-pixel drive at the calibrated high
+    // temperature value, substantially cleaner than a differential update.
     sendCommand(CMD_WRITE_TEMP);
     sendData(0x5A);
-    displayMode |= 0xD4;
+    displayMode = 0xD7;
+    isScreenOn = false;
   } else { // FAST_REFRESH
-    displayMode |= customLutActive ? 0x0C : 0x1C;
+    if (customLutActive) {
+      // The custom grayscale LUT is already resident. Power the controller
+      // first only when the previous full update shut it down.
+      displayMode = isScreenOn ? 0x0C : 0xCC;
+    } else {
+      displayMode = 0xFC;
+    }
+    isScreenOn = true;
   }
 
   // Power on and refresh display
@@ -1868,6 +1885,14 @@ void EInkDisplay::refreshDisplay(const RefreshMode mode,
   if (Serial)
     Serial.printf("[%lu]   Waiting for display refresh...\n", millis());
   waitWhileBusy(refreshType);
+
+  if (mode == FAST_REFRESH && turnOffScreen && isScreenOn) {
+    sendCommand(CMD_DISPLAY_UPDATE_CTRL2);
+    sendData(0x83);
+    sendCommand(CMD_MASTER_ACTIVATION);
+    waitWhileBusy("fast power-down");
+    isScreenOn = false;
+  }
 }
 
 void EInkDisplay::setCustomLUT(const bool enabled,
@@ -1913,9 +1938,10 @@ void EInkDisplay::deepSleep() {
   if (isScreenOn) {
     sendCommand(CMD_DISPLAY_UPDATE_CTRL1);
     sendData(CTRL1_BYPASS_RED); // Normal mode
+    sendData(0x00);             // single-chip application
 
     sendCommand(CMD_DISPLAY_UPDATE_CTRL2);
-    sendData(0x03); // Set ANALOG_OFF_PHASE (bit 1) and CLOCK_OFF (bit 0)
+    sendData(0x83); // Enable clock, then disable analog and clock
 
     sendCommand(CMD_MASTER_ACTIVATION);
 

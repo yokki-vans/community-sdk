@@ -103,7 +103,8 @@ class EInkDisplay {
 
   void refreshDisplay(RefreshMode mode = FAST_REFRESH, bool turnOffScreen = false);
 
-  // Hint the X3 policy to run a one-shot full resync on next update.
+  // Run a one-shot full resync on the next update. X3 uses its OEM full-sync
+  // bank; X4 uses the controller's complete 0xF7 waveform.
   void requestResync(uint8_t settlePasses = 0);
 
   // Zero the X3 initial-full-sync counter and mark the RED RAM as already
@@ -151,6 +152,8 @@ class EInkDisplay {
   uint8_t _x3InitialFullSyncsRemaining = 0;
   bool _x3ForceFullSyncNext = false;
   uint8_t _x3ForcedConditionPassesNext = 0;
+  bool _x4FirstUpdate = true;
+  bool _x4ForceFullSyncNext = false;
   // Frame buffer (statically allocated)
   uint8_t frameBuffer0[MAX_BUFFER_SIZE];
   uint8_t* frameBuffer;
