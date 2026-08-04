@@ -31,8 +31,10 @@ class PowerManager {
   static void armWakeOnPins(uint64_t gpioMask, bool wakeLow = true);
 
   // Poll the power-button GPIO (raw read, with the matching pull) until released,
-  // so deep sleep isn't immediately cancelled by a still-held press.
-  static void waitForPowerButtonRelease();
+  // so deep sleep isn't immediately cancelled by a still-held press. Bounded so
+  // a stuck switch/ADC line cannot hang shutdown forever. Returns false on the
+  // timeout; deepSleepUntilPowerButton() then sleeps until the release level.
+  static bool waitForPowerButtonRelease(uint32_t timeoutMs = 10000);
 
   // Drive every assigned peripheral power-rail enable in the active board
   // profile (display / SD / touch / mic) to its OFF level and latch it with

@@ -44,16 +44,19 @@ bool PowerManager::armPowerButtonWakeup() {
   return true;
 }
 
-void PowerManager::waitForPowerButtonRelease() {
+bool PowerManager::waitForPowerButtonRelease(uint32_t timeoutMs) {
   const int8_t pin = powerPin();
-  if (pin < 0) return;
+  if (pin < 0) return true;
   const bool activeHigh = powerActiveHigh();
 
   pinMode(pin, activeHigh ? INPUT_PULLDOWN : INPUT_PULLUP);
   const int pressedLevel = activeHigh ? HIGH : LOW;
+  const unsigned long started = millis();
   while (digitalRead(pin) == pressedLevel) {
+    if (millis() - started >= timeoutMs) return false;
     delay(50);
   }
+  return true;
 }
 
 namespace {
@@ -90,8 +93,21 @@ void PowerManager::deepSleep() {
 }
 
 void PowerManager::deepSleepUntilPowerButton() {
-  waitForPowerButtonRelease();
-  armPowerButtonWakeup();
+  if (waitForPowerButtonRelease()) {
+    armPowerButtonWakeup();
+  } else {
+    // A stuck/very long press must not block this task indefinitely, and arming
+    // the normal active-level wake while it is held would immediately reboot in
+    // a tight loop. Sleep on the opposite (released) level instead. The release
+    // causes one boot; the application's normal press verification sends it back
+    // to sleep until the next intentional press.
+    const int8_t pin = powerPin();
+    if (pin >= 0) {
+      const bool activeHigh = powerActiveHigh();
+      pinMode(pin, activeHigh ? INPUT_PULLDOWN : INPUT_PULLUP);
+      armWakeOnPins(1ULL << pin, /*wakeLow=*/activeHigh);
+    }
+  }
   deepSleep();
 }
 

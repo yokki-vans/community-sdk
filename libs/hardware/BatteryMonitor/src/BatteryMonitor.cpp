@@ -244,9 +244,7 @@ BatteryMonitor::BatteryMonitor(int8_t adcPin, float dividerMultiplier, int8_t ch
   }
 }
 
-bool BatteryMonitor::hasAdcBackend() const {
-  return _adcPin >= 0;
-}
+bool BatteryMonitor::hasAdcBackend() const { return _adcPin >= 0; }
 
 bool BatteryMonitor::hasGaugeBackend() const {
 #if FREEINK_BATTERY_I2C_GAUGE
@@ -256,9 +254,7 @@ bool BatteryMonitor::hasGaugeBackend() const {
 #endif
 }
 
-bool BatteryMonitor::hasM5Pm1Backend() const {
-  return BoardConfig::isM5StackPaperColor();
-}
+bool BatteryMonitor::hasM5Pm1Backend() const { return BoardConfig::isM5StackPaperColor(); }
 
 uint16_t BatteryMonitor::readPercentage() const {
 #if FREEINK_BATTERY_I2C_GAUGE
@@ -374,30 +370,38 @@ uint16_t BatteryMonitor::readMillivolts() const {
   return static_cast<uint16_t>(mv * _dividerMultiplier);
 }
 
-double BatteryMonitor::readVolts() const {
-  return static_cast<double>(readMillivolts()) / 1000.0;
-}
+double BatteryMonitor::readVolts() const { return static_cast<double>(readMillivolts()) / 1000.0; }
 
 bool BatteryMonitor::isCharging() const {
+  bool charging = false;
+  return readChargingChecked(charging) && charging;
+}
+
+bool BatteryMonitor::readChargingChecked(bool& out) const {
 #if FREEINK_BATTERY_I2C_GAUGE
   // Gauge boards: prefer a charger IC's status (BQ25896), else fall back to the
   // gauge's own Current() sign, so a board with a gauge but no charger IC (e.g.
-  // X3) still reports charging. Unknown/failed reads report false.
+  // X3) still reports charging.
   if (BoardConfig::ACTIVE.batteryGauge.gaugeAddr != 0) {
     bool known = false;
     const bool charging = readGaugeCharging(known);
-    return known && charging;
+    if (!known) return false;
+    out = charging;
+    return true;
   }
 #endif
   if (hasM5Pm1Backend()) {
     Status status;
-    return readM5Pm1Status(status) && status.chargingKnown && status.charging;
+    if (!readM5Pm1Status(status) || !status.chargingKnown) return false;
+    out = status.charging;
+    return true;
   }
   if (_chargeStatusPin < 0) {
     return false;
   }
   // MCP73832-style /STAT: LOW while charging.
-  return digitalRead(_chargeStatusPin) == LOW;
+  out = digitalRead(_chargeStatusPin) == LOW;
+  return true;
 }
 
 bool BatteryMonitor::readM5Pm1Status(Status& status) const {
@@ -443,10 +447,7 @@ bool BatteryMonitor::readM5Pm1Status(Status& status) const {
 uint16_t BatteryMonitor::percentageFromMillivolts(uint16_t millivolts) {
   double volts = millivolts / 1000.0;
   // Polynomial derived from LiPo samples
-  double y = -144.9390 * volts * volts * volts +
-             1655.8629 * volts * volts -
-             6158.8520 * volts +
-             7501.3202;
+  double y = -144.9390 * volts * volts * volts + 1655.8629 * volts * volts - 6158.8520 * volts + 7501.3202;
 
   // Clamp to [0,100] and round
   y = std::max(y, 0.0);

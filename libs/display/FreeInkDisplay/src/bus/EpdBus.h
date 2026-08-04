@@ -53,19 +53,32 @@ class EpdBus {
   // Grouped transaction primitives (used by multi-step sequences, e.g. M5).
   void beginTxn();
   void endTxn();
-  void rawCmd(uint8_t c);                            // assumes a transaction is open
-  void rawData(uint8_t d);                           // assumes a transaction is open
+  void rawCmd(uint8_t c);                              // assumes a transaction is open
+  void rawData(uint8_t d);                             // assumes a transaction is open
   void rawWriteBytes(const uint8_t* d, uint16_t len);  // bulk data, transaction open
 
   // Wait for a refresh/operation to finish using the configured (or given) polarity.
-  void waitBusy(const char* tag = nullptr);
-  void waitBusy(BusyPolarity p, const char* tag = nullptr);
+  // Returns false on a missing expected X3 BUSY phase or a 30 s timeout. A
+  // failure is sticky in waitHealthy() until clearWaitError()/begin(), allowing
+  // a driver or facade to invalidate its differential baseline and reinitialize
+  // the controller instead of silently continuing as if the waveform finished.
+  bool waitBusy(const char* tag = nullptr);
+  bool waitBusy(BusyPolarity p, const char* tag = nullptr);
 
   // Like waitBusy(), but sleeps the calling task on a BUSY-edge interrupt and
   // wakes exactly on the completion edge instead of polling every 1 ms. For the
   // refresh-completion wait: it confirms the waveform is running (short bounded
   // poll) before arming, so it is safe to call right after firing the refresh.
-  void waitRefreshComplete(const char* tag = nullptr);
+  bool waitRefreshComplete(const char* tag = nullptr);
+
+  // Bounded confirmation used by split/async drivers immediately after firing
+  // a waveform. It prevents an idle BUSY level from being mistaken for an
+  // already-completed refresh. Returns false and latches a wait error when the
+  // controller never enters its active level.
+  bool waitForBusyStart(uint32_t timeoutMs = 50, const char* tag = nullptr);
+
+  bool waitHealthy() const { return _waitHealthy; }
+  void clearWaitError() { _waitHealthy = true; }
 
   // Instantaneous BUSY-pin read for non-blocking refresh polling. X3's
   // two-phase wait can't be captured in a single read; its terminal state is
@@ -132,6 +145,8 @@ class EpdBus {
   BusyPolarity _busy = BusyPolarity::ActiveHigh;
   uint32_t _spiHz = 40000000;
   int8_t _coCs = -1;
+  bool _waitHealthy = true;
+  bool _refreshStartObserved = false;
 };
 
 }  // namespace freeink

@@ -83,8 +83,18 @@ int SecureClient::connectWithMethod(const char* host, uint16_t port, void* metho
   if (_insecure) {
     wolfSSL_CTX_set_verify(ctx, WOLFSSL_VERIFY_NONE, nullptr);
   } else if (_rootCA) {
-    wolfSSL_CTX_load_verify_buffer(ctx, reinterpret_cast<const unsigned char*>(_rootCA),
-                                   strlen(_rootCA), WOLFSSL_FILETYPE_PEM);
+    const int caResult = wolfSSL_CTX_load_verify_buffer(ctx, reinterpret_cast<const unsigned char*>(_rootCA),
+                                                        strlen(_rootCA), WOLFSSL_FILETYPE_PEM);
+    if (caResult != WOLFSSL_SUCCESS) {
+      if (Serial) Serial.printf("[SecureClient] CA load failed (%s): %d\n", label, caResult);
+      stop();
+      return 0;
+    }
+    wolfSSL_CTX_set_verify(ctx, WOLFSSL_VERIFY_PEER, nullptr);
+  } else {
+    if (Serial) Serial.printf("[SecureClient] no CA configured (%s)\n", label);
+    stop();
+    return 0;
   }
   wolfSSL_SetIORecv(ctx, wcRecv);
   wolfSSL_SetIOSend(ctx, wcSend);
@@ -96,6 +106,13 @@ int SecureClient::connectWithMethod(const char* host, uint16_t port, void* metho
     return 0;
   }
   _ssl = ssl;
+  // Chain validation alone is insufficient: bind the certificate SAN/CN to
+  // the requested DNS name before the handshake completes.
+  if (wolfSSL_check_domain_name(ssl, host) != WOLFSSL_SUCCESS) {
+    if (Serial) Serial.printf("[SecureClient] hostname check setup failed (%s): %s\n", label, host);
+    stop();
+    return 0;
+  }
   wolfSSL_SetIOReadCtx(ssl, &_transport);
   wolfSSL_SetIOWriteCtx(ssl, &_transport);
   wolfSSL_UseSNI(ssl, WOLFSSL_SNI_HOST_NAME, host, strlen(host));

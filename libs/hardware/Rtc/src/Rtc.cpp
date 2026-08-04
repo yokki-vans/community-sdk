@@ -1,8 +1,7 @@
 #include "Rtc.h"
 
-#include <time.h>
-
 #include <BoardConfig.h>
+#include <time.h>
 
 #if FREEINK_CAP_RTC
 
@@ -28,7 +27,7 @@ constexpr uint8_t DS3231_STATUS_OSF = 0x80;
 
 bool g_wireReady[2] = {false, false};
 TwoWire& sensorWire() {
-  const auto& s = BoardConfig::ACTIVE.sensors;
+  [[maybe_unused]] const auto& s = BoardConfig::ACTIVE.sensors;
 #if SOC_I2C_NUM > 1
   return s.i2cBus == 1 ? Wire1 : Wire;
 #else

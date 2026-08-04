@@ -5,18 +5,18 @@
 namespace freeink {
 namespace {
 // UC8279d command set (UC8279d_B 0.1 datasheet, command table pp. 8-11).
-constexpr uint8_t CMD_PANEL_SETTING = 0x00;      // PSR
-constexpr uint8_t CMD_POWER_OFF = 0x02;          // POF
-constexpr uint8_t CMD_POWER_ON = 0x04;           // PON
-constexpr uint8_t CMD_DEEP_SLEEP = 0x07;         // DSLP (check code 0xA5)
-constexpr uint8_t CMD_DTM1 = 0x10;               // OLD plane in KW mode
-constexpr uint8_t CMD_DATA_STOP = 0x11;          // DSP
-constexpr uint8_t CMD_DISPLAY_REFRESH = 0x12;    // DRF
-constexpr uint8_t CMD_DTM2 = 0x13;               // NEW plane in KW mode
-constexpr uint8_t CMD_VCOM_DATA_INTERVAL = 0x50; // CDI
-constexpr uint8_t CMD_TCON = 0x60;               // TCON
-constexpr uint8_t CMD_RESOLUTION = 0x61;         // TRES
-constexpr uint8_t CMD_GATE_SOURCE_START = 0x65;  // GSST
+constexpr uint8_t CMD_PANEL_SETTING = 0x00;       // PSR
+constexpr uint8_t CMD_POWER_OFF = 0x02;           // POF
+constexpr uint8_t CMD_POWER_ON = 0x04;            // PON
+constexpr uint8_t CMD_DEEP_SLEEP = 0x07;          // DSLP (check code 0xA5)
+constexpr uint8_t CMD_DTM1 = 0x10;                // OLD plane in KW mode
+constexpr uint8_t CMD_DATA_STOP = 0x11;           // DSP
+constexpr uint8_t CMD_DISPLAY_REFRESH = 0x12;     // DRF
+constexpr uint8_t CMD_DTM2 = 0x13;                // NEW plane in KW mode
+constexpr uint8_t CMD_VCOM_DATA_INTERVAL = 0x50;  // CDI
+constexpr uint8_t CMD_TCON = 0x60;                // TCON
+constexpr uint8_t CMD_RESOLUTION = 0x61;          // TRES
+constexpr uint8_t CMD_GATE_SOURCE_START = 0x65;   // GSST
 }  // namespace
 
 const Uc8279Config& uc8279DefaultConfig() {
@@ -48,11 +48,21 @@ PanelGeometry Uc8279Driver::geometry() const { return {_w, _h, _wb, _bufferSize}
 void Uc8279Driver::triggerRefresh(EpdBus& bus, bool turnOff) {
   if (!_isScreenOn) {
     bus.cmd(CMD_POWER_ON);
-    bus.waitBusy(" 8279_PON");
+    if (!bus.waitBusy(" 8279_PON")) {
+      _isScreenOn = false;
+      _oldPlaneSynced = false;
+      _forceFullSyncNext = true;
+      return;
+    }
     _isScreenOn = true;
   }
   bus.cmd(CMD_DISPLAY_REFRESH);
-  bus.waitBusy(" 8279_DRF");
+  if (!bus.waitBusy(" 8279_DRF")) {
+    _isScreenOn = false;
+    _oldPlaneSynced = false;
+    _forceFullSyncNext = true;
+    return;
+  }
   if (turnOff) {
     bus.cmd(CMD_POWER_OFF);
     bus.waitBusy(" 8279_POF");
@@ -126,16 +136,20 @@ bool Uc8279Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* p
 
   if (!_isScreenOn || doFullSync) {
     bus.cmd(CMD_POWER_ON);
-    bus.waitBusy(" 8279_PON");
+    if (!bus.waitBusy(" 8279_PON")) {
+      _isScreenOn = false;
+      _oldPlaneSynced = false;
+      _forceFullSyncNext = true;
+      return false;
+    }
     _isScreenOn = true;
   }
   bus.cmd(CMD_DISPLAY_REFRESH);
-  // Confirm the waveform started (BUSY_N dropped LOW) before returning, so
-  // displayFinish() only rides out the completion edge.
-  {
-    const int8_t busyPin = bus.pins().busy;
-    const unsigned long t0 = millis();
-    while (digitalRead(busyPin) == HIGH && millis() - t0 < 50) delay(1);
+  if (!bus.waitForBusyStart(50, " 8279_DRF start")) {
+    _isScreenOn = false;
+    _oldPlaneSynced = false;
+    _forceFullSyncNext = true;
+    return false;
   }
   _pendingTurnOff = turnOff;
   _pendingRefresh = true;
@@ -146,7 +160,12 @@ void Uc8279Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
   if (!_pendingRefresh) return;
   _pendingRefresh = false;
 
-  bus.waitRefreshComplete(" 8279_DRF");
+  if (!bus.waitRefreshComplete(" 8279_DRF")) {
+    _isScreenOn = false;
+    _oldPlaneSynced = false;
+    _forceFullSyncNext = true;
+    return;
+  }
   if (_pendingTurnOff) {
     bus.cmd(CMD_POWER_OFF);
     bus.waitBusy(" 8279_POF");

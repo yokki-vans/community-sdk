@@ -43,10 +43,8 @@ const Uc8253X3Config& uc8253X3DefaultConfig() {
       {lut_x3_vcom_gc, lut_x3_ww_gc, lut_x3_bw_gc, lut_x3_wb_gc, lut_x3_bb_gc},
       {lut_x3_vcom_aa_pre_bw_mid, lut_x3_ww_aa_pre_bw_mid, lut_x3_bw_aa_pre_bw_mid, lut_x3_wb_aa_pre_bw_mid,
        lut_x3_bb_aa_pre_bw_mid},
-      {lut_x3_vcom_factory_p1, lut_x3_ww_factory_p1, lut_x3_bw_factory_p1, lut_x3_wb_factory_p1,
-       lut_x3_bb_factory_p1},
-      {lut_x3_vcom_factory_p2, lut_x3_ww_factory_p2, lut_x3_bw_factory_p2, lut_x3_wb_factory_p2,
-       lut_x3_bb_factory_p2},
+      {lut_x3_vcom_factory_p1, lut_x3_ww_factory_p1, lut_x3_bw_factory_p1, lut_x3_wb_factory_p1, lut_x3_bb_factory_p1},
+      {lut_x3_vcom_factory_p2, lut_x3_ww_factory_p2, lut_x3_bw_factory_p2, lut_x3_wb_factory_p2, lut_x3_bb_factory_p2},
       42,  // controller accepts 42 bytes of each 43-byte array
   };
   return cfg;
@@ -85,11 +83,21 @@ void Uc8253X3Driver::loadBankCdi(EpdBus& bus, uint8_t cdi0, uint8_t cdi1, const 
 void Uc8253X3Driver::triggerRefresh(EpdBus& bus, bool turnOff) {
   if (!_isScreenOn) {
     bus.cmd(CMD_POWER_ON);
-    bus.waitBusy(" X3_PON");
+    if (!bus.waitBusy(" X3_PON")) {
+      _isScreenOn = false;
+      _redRamSynced = false;
+      _forceFullSyncNext = true;
+      return;
+    }
     _isScreenOn = true;
   }
   bus.cmd(CMD_DISPLAY_REFRESH);
-  bus.waitBusy(" X3_DRF");
+  if (!bus.waitBusy(" X3_DRF")) {
+    _isScreenOn = false;
+    _redRamSynced = false;
+    _forceFullSyncNext = true;
+    return;
+  }
   if (turnOff) {
     bus.cmd(CMD_POWER_OFF);
     bus.waitBusy(" X3_POF");
@@ -193,18 +201,23 @@ bool Uc8253X3Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
   // doFullSync re-powers the charge pump even if already on (higher current).
   if (!_isScreenOn || doFullSync) {
     bus.cmd(CMD_POWER_ON);
-    bus.waitBusy(" X3_PON");
+    if (!bus.waitBusy(" X3_PON")) {
+      _isScreenOn = false;
+      _redRamSynced = false;
+      _forceFullSyncNext = true;
+      return false;
+    }
     _isScreenOn = true;
   }
   bus.cmd(CMD_DISPLAY_REFRESH);
-  // Confirm the waveform actually started (BUSY dropped LOW) before handing the
-  // CPU back, so displayFinish()'s waitBusy() only rides out the second
-  // (LOW->HIGH) phase. Short timeout: a missed edge just falls through to the
-  // full two-phase wait in displayFinish().
-  {
-    const int8_t busyPin = bus.pins().busy;
-    const unsigned long t0 = millis();
-    while (digitalRead(busyPin) == HIGH && millis() - t0 < 50) delay(1);
+  // Confirm the waveform actually started before handing the CPU back. Without
+  // this, an idle BUSY level is indistinguishable from an already-finished
+  // waveform in the async completion path.
+  if (!bus.waitForBusyStart(50, " X3_DRF start")) {
+    _isScreenOn = false;
+    _redRamSynced = false;
+    _forceFullSyncNext = true;
+    return false;
   }
   _pendingTurnOff = turnOff;
   _pendingDoFullSync = doFullSync;
@@ -223,7 +236,12 @@ void Uc8253X3Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
   // ISR-backed wait: displayStart() already confirmed BUSY dropped LOW, so the
   // waveform is running and waitRefreshComplete() will wake on the exact
   // completion edge rather than polling at 1 ms granularity.
-  bus.waitRefreshComplete(" X3_DRF");
+  if (!bus.waitRefreshComplete(" X3_DRF")) {
+    _isScreenOn = false;
+    _redRamSynced = false;
+    _forceFullSyncNext = true;
+    return;
+  }
   if (turnOff) {
     bus.cmd(CMD_POWER_OFF);
     bus.waitBusy(" X3_POF");
@@ -234,8 +252,10 @@ void Uc8253X3Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
 
   uint8_t postConditionPasses = 0;
   if (doFullSync) {
-    if (_forceFullSyncNext) postConditionPasses = _forcedConditionPassesNext;
-    else if (_initialFullSyncsRemaining == 1) postConditionPasses = 1;
+    if (_forceFullSyncNext)
+      postConditionPasses = _forcedConditionPassesNext;
+    else if (_initialFullSyncsRemaining == 1)
+      postConditionPasses = 1;
   }
   if (postConditionPasses > 0) {
     const uint16_t xEnd = static_cast<uint16_t>(_w - 1);

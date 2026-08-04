@@ -3,7 +3,6 @@
 #include <Arduino.h>
 #include <BoardConfig.h>
 #include <Wire.h>
-
 #include <string.h>
 
 #include "nvs.h"
@@ -153,22 +152,40 @@ void releaseDisplayPins(const EpdProbePins& p) {
   if (p.rst >= 0) pinMode(p.rst, INPUT);
 }
 
-// Two-pass probe with agreement, over an arbitrary pinout. Confirmed only when
-// both passes match the UC81xx signature AND agree on the VER bytes — a floating
-// bus can't produce the same stable non-trivial pattern twice. Disagreement is
-// Inconclusive; both-fail is PrimaryAssumed (the profile's default controller).
+// Three-pass probe with agreement, over an arbitrary pinout. Confirmed only when
+// at least two passes match the UC81xx signature AND agree on the VER bytes — a
+// floating bus can't produce the same stable non-trivial pattern twice. A failed
+// read is never positive evidence of the primary controller: it may be a
+// temporarily unpowered/stuck panel bus, so every non-confirmed result remains
+// Inconclusive and the caller may use (but must not persist) its profile default.
 DisplayControllerVerdict probeDisplayController(const EpdProbePins& p, uint8_t verBytes[5], uint8_t* flg) {
-  uint8_t ver1[5] = {0};
-  uint8_t ver2[5] = {0};
-  uint8_t flg1 = 0;
-  const bool pass1 = runDisplayProbePass(p, ver1, &flg1);
-  delay(2);
-  const bool pass2 = runDisplayProbePass(p, ver2, nullptr);
+  uint8_t versions[3][5] = {};
+  uint8_t flags[3] = {};
+  bool passed[3] = {};
+  for (uint8_t i = 0; i < 3; ++i) {
+    passed[i] = runDisplayProbePass(p, versions[i], &flags[i]);
+    if (i != 2) delay(5);
+  }
   releaseDisplayPins(p);
-  if (verBytes) memcpy(verBytes, ver1, 5);
-  if (flg) *flg = flg1;
-  if (pass1 && pass2 && memcmp(ver1, ver2, 5) == 0) return DisplayControllerVerdict::Uc81xxConfirmed;
-  if (!pass1 && !pass2) return DisplayControllerVerdict::PrimaryAssumed;
+
+  uint8_t reportIndex = 0;
+  for (uint8_t i = 0; i < 3; ++i) {
+    if (passed[i]) {
+      reportIndex = i;
+      break;
+    }
+  }
+  if (verBytes) memcpy(verBytes, versions[reportIndex], 5);
+  if (flg) *flg = flags[reportIndex];
+
+  for (uint8_t i = 0; i < 3; ++i) {
+    if (!passed[i]) continue;
+    for (uint8_t j = static_cast<uint8_t>(i + 1); j < 3; ++j) {
+      if (passed[j] && memcmp(versions[i], versions[j], 5) == 0) {
+        return DisplayControllerVerdict::Uc81xxConfirmed;
+      }
+    }
+  }
   return DisplayControllerVerdict::Inconclusive;
 }
 
@@ -366,16 +383,30 @@ uint8_t runProbePass() {
 }  // namespace
 
 XteinkVerdict detectXteinkVerdict(uint8_t* score1, uint8_t* score2) {
-  const uint8_t pass1 = runProbePass();
-  delay(2);
-  const uint8_t pass2 = runProbePass();
-  if (score1) *score1 = pass1;
-  if (score2) *score2 = pass2;
-  // X3 confirmed only when both passes see at least two of the three chips; the
-  // X4 sees zero, so a single stray ACK never flips the result. Anything in
-  // between is Inconclusive: callers should run as X4 but may re-probe later.
-  if (pass1 >= 2 && pass2 >= 2) return XteinkVerdict::X3Confirmed;
-  if (pass1 == 0 && pass2 == 0) return XteinkVerdict::X4Confirmed;
+  // Give the X3 peripherals and pull-ups time to settle before treating an
+  // absent ACK as evidence. Every pass tears Wire down and starts it again,
+  // which also resets the ESP32-C3 I2C peripheral after a stuck transaction.
+  delay(25);
+  uint8_t scores[5] = {};
+  for (uint8_t i = 0; i < 5; ++i) {
+    scores[i] = runProbePass();
+    if (i != 4) delay(10);
+  }
+  if (score1) *score1 = scores[0];
+  if (score2) *score2 = scores[1];
+
+  // Two independent strong fingerprints out of five tolerate several transient
+  // I2C failures without ever letting a single stray ACK identify an X3.
+  uint8_t x3Passes = 0;
+  bool allZero = true;
+  for (const uint8_t score : scores) {
+    if (score >= 2) ++x3Passes;
+    if (score != 0) allZero = false;
+  }
+  if (x3Passes >= 2) return XteinkVerdict::X3Confirmed;
+  // All-zero is consistent with X4, but also with a temporarily unavailable X3
+  // bus. Callers may use X4 as a per-boot fallback; they must not persist it.
+  if (allZero) return XteinkVerdict::X4Confirmed;
   return XteinkVerdict::Inconclusive;
 }
 
@@ -389,9 +420,12 @@ X3DisplayVerdict detectX3DisplayController(uint8_t verBytes[5], uint8_t* flg) {
   // here, before selectDevice) has the right map either way.
   const DisplayControllerVerdict v = detectXteinkDisplayController(verBytes, flg);
   switch (v) {
-    case DisplayControllerVerdict::Uc81xxConfirmed: return X3DisplayVerdict::Uc8279Confirmed;
-    case DisplayControllerVerdict::PrimaryAssumed: return X3DisplayVerdict::Uc8253Assumed;
-    default: return X3DisplayVerdict::Inconclusive;
+    case DisplayControllerVerdict::Uc81xxConfirmed:
+      return X3DisplayVerdict::Uc8279Confirmed;
+    case DisplayControllerVerdict::PrimaryAssumed:
+      return X3DisplayVerdict::Uc8253Assumed;
+    default:
+      return X3DisplayVerdict::Inconclusive;
   }
 }
 

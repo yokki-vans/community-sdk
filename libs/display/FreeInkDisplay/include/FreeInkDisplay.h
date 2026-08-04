@@ -41,7 +41,10 @@ class FreeInkDisplay {
   void setFastRefreshCutoffMs(uint16_t ms);
   uint16_t fastRefreshCutoffMs() const;
 
-  void begin();
+  // Initializes the selected driver and allocates every required framebuffer.
+  // Returns false without dereferencing a null buffer when allocation or panel
+  // initialization fails. Callers must not render until this returns true.
+  bool begin();
 
   // Legacy compile-time dimensions kept for compatibility.
   static constexpr uint16_t DISPLAY_WIDTH = 800;
@@ -65,8 +68,10 @@ class FreeInkDisplay {
 
   // Frame buffer operations
   void clearScreen(uint8_t color = 0xFF) const;
-  void drawImage(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool fromProgmem = false) const;
-  void drawImageTransparent(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool fromProgmem = false) const;
+  void drawImage(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                 bool fromProgmem = false) const;
+  void drawImageTransparent(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                            bool fromProgmem = false) const;
   // Persistent black/white output inversion. Framebuffers remain in their
   // normal logical colors, so callers keep drawing exactly as before; the
   // facade transforms frames only while sending them to the panel. The first
@@ -248,6 +253,7 @@ class FreeInkDisplay {
   // Access to frame buffer
   uint8_t* getFrameBuffer() const { return frameBuffer; }
   bool framebufferReady() const { return frameBuffer != nullptr; }
+  bool panelReady() const { return _driver != nullptr && frameBuffer != nullptr && _bus.waitHealthy(); }
 
   // Copy the just-displayed frame (frameBufferActive) back into the write buffer.
   // displayBuffer() ends with swapBuffers(), so the write buffer would otherwise
@@ -335,6 +341,10 @@ class FreeInkDisplay {
   // Block until a pending async refresh completes (no-op when none is).
   // Every blocking panel operation calls this before touching the bus.
   void syncPendingAsync();
+  // A BUSY timeout invalidates every differential baseline. Reinitialize the
+  // controller before another operation; false means the retry also failed.
+  bool ensureBusReady();
+  void invalidateDisplayState();
   // Shared body of displayBufferAsync() / triggerDisplayAsync(): fire the
   // update and return while the waveform runs (_asyncPending set).
   void displayAsyncImpl(RefreshMode mode, bool turnOffScreen, bool noShadow = false);

@@ -1,10 +1,8 @@
 #include "Uc8179Driver.h"
 
 #include <Arduino.h>
-
-#include <string.h>
-
 #include <BoardConfig.h>
+#include <string.h>
 
 namespace freeink {
 namespace {
@@ -190,18 +188,22 @@ bool Uc8179Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* p
 
   if (!_isScreenOn) {
     bus.cmd(CMD_POWER_ON);
-    bus.waitBusy(" 8179_PON");
+    if (!bus.waitBusy(" 8179_PON")) {
+      _isScreenOn = false;
+      _oldPlaneValid = false;
+      _needFullClear = true;
+      return false;
+    }
     _isScreenOn = true;
   }
 
   if (fast) bus.cmd(CMD_PARTIAL_IN);  // PTIN — whole-panel partial (no 0x90 window)
   bus.cmd(CMD_DISPLAY_REFRESH);
-  // Confirm the waveform started (BUSY dropped) before returning, so
-  // displayFinish() only rides out the completion edge.
-  {
-    const int8_t busyPin = bus.pins().busy;
-    const unsigned long t0 = millis();
-    while (digitalRead(busyPin) == HIGH && millis() - t0 < 50) delay(1);
+  if (!bus.waitForBusyStart(50, " 8179_DRF start")) {
+    _isScreenOn = false;
+    _oldPlaneValid = false;
+    _needFullClear = true;
+    return false;
   }
   _pendingPartial = fast;
   _pendingTurnOff = turnOff;
@@ -213,7 +215,12 @@ void Uc8179Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
   if (!_pendingRefresh) return;
   _pendingRefresh = false;
 
-  bus.waitRefreshComplete(" 8179_DRF");
+  if (!bus.waitRefreshComplete(" 8179_DRF")) {
+    _isScreenOn = false;
+    _oldPlaneValid = false;
+    _needFullClear = true;
+    return;
+  }
   if (_pendingPartial) bus.cmd(CMD_PARTIAL_OUT);  // PTOUT closes the partial window
   // Restore the idle CDI (border) after the refresh, as the OEM does.
   bus.cmd(CMD_VCOM_DATA_INTERVAL);
