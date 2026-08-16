@@ -7,14 +7,13 @@
 // set. Written from the UC8279d_B 0.1 datasheet (Dec 2025); PENDING HARDWARE
 // VALIDATION on a UC8279 X3 unit.
 //
-// v1 drives the panel with the factory OTP waveforms (PSR REG=0): the 4K MTP
+// The driver uses the factory OTP waveforms (PSR REG=0): the 4K MTP
 // holds 12 temperature-range LUT sets including per-range frame rate and rail
 // voltages, so PWR/PLL/VDCS are left at silicon defaults and every refresh is
-// temperature-compensated by the controller itself. That means Full/Half/Fast
-// all currently run the same OTP waveform (a full GC-style flash) — correct
-// but not fast. Custom register banks (REG=1, commands 0x20-0x24, 7-byte-group
-// format ≠ UC8253's 43-byte format) are the follow-up once we can tune LUTs on
-// real hardware; inject them via Uc8279Config when that lands.
+// temperature-compensated by the controller itself. FAST updates are enclosed
+// in PTIN/PTOUT so the MTP partial waveform is selected; FULL/HALF retain the
+// clean normal path. Custom register banks are therefore unnecessary for menu
+// navigation and remain available as a future panel-tuning option.
 //
 // BUSY_N: low while busy (PON/DRF/POF all flag), same two-phase shape as the
 // UC8253 X3 — reuses BusyPolarity::X3TwoPhase and the async start/finish split.
@@ -77,6 +76,7 @@ class Uc8279Driver : public PanelDriver {
   // Async split state (see Uc8253X3Driver for the contract).
   bool _pendingRefresh = false;
   bool _pendingTurnOff = false;
+  bool _pendingPartial = false;
 };
 
 PanelDriver& uc8279Driver();

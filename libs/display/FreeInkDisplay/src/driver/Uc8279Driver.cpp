@@ -2,6 +2,8 @@
 
 #include <BoardConfig.h>
 
+#include "X3RefreshPolicy.h"
+
 namespace freeink {
 namespace {
 // UC8279d command set (UC8279d_B 0.1 datasheet, command table pp. 8-11).
@@ -12,6 +14,8 @@ constexpr uint8_t CMD_DEEP_SLEEP = 0x07;          // DSLP (check code 0xA5)
 constexpr uint8_t CMD_DTM1 = 0x10;                // OLD plane in KW mode
 constexpr uint8_t CMD_DATA_STOP = 0x11;           // DSP
 constexpr uint8_t CMD_DISPLAY_REFRESH = 0x12;     // DRF
+constexpr uint8_t CMD_PARTIAL_IN = 0x91;           // PTIN
+constexpr uint8_t CMD_PARTIAL_OUT = 0x92;          // PTOUT
 constexpr uint8_t CMD_DTM2 = 0x13;                // NEW plane in KW mode
 constexpr uint8_t CMD_VCOM_DATA_INTERVAL = 0x50;  // CDI
 constexpr uint8_t CMD_TCON = 0x60;                // TCON
@@ -121,7 +125,9 @@ void Uc8279Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, 
 
 bool Uc8279Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) {
   (void)prev;
-  const bool doFullSync = (mode == RefreshMode::Full) || !_oldPlaneSynced || _forceFullSyncNext;
+  const bool fastRequested = mode == RefreshMode::Fast;
+  const bool doPartial = x3_refresh::useOtpPartial(fastRequested, _oldPlaneSynced, _forceFullSyncNext);
+  const bool doFullSync = !doPartial && ((mode == RefreshMode::Full) || !_oldPlaneSynced || _forceFullSyncNext);
 
   if (doFullSync) {
     // Absolute write from a white OLD baseline; the OTP waveform drives every
@@ -144,14 +150,16 @@ bool Uc8279Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* p
     }
     _isScreenOn = true;
   }
+  if (doPartial) bus.cmd(CMD_PARTIAL_IN);
   bus.cmd(CMD_DISPLAY_REFRESH);
-  if (!bus.waitForBusyStart(50, " 8279_DRF start")) {
+  if (!bus.waitForBusyStart(x3_refresh::BUSY_START_TIMEOUT_MS, " 8279_DRF start")) {
     _isScreenOn = false;
     _oldPlaneSynced = false;
     _forceFullSyncNext = true;
     return false;
   }
   _pendingTurnOff = turnOff;
+  _pendingPartial = doPartial;
   _pendingRefresh = true;
   return true;
 }
@@ -166,6 +174,7 @@ void Uc8279Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
     _forceFullSyncNext = true;
     return;
   }
+  if (_pendingPartial) bus.cmd(CMD_PARTIAL_OUT);
   if (_pendingTurnOff) {
     bus.cmd(CMD_POWER_OFF);
     bus.waitBusy(" 8279_POF");

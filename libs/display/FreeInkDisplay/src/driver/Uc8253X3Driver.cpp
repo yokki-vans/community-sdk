@@ -3,6 +3,7 @@
 #include <BoardConfig.h>
 
 #include "../lut/Uc8253X3Luts.h"
+#include "X3RefreshPolicy.h"
 
 namespace freeink {
 namespace {
@@ -213,7 +214,7 @@ bool Uc8253X3Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
   // Confirm the waveform actually started before handing the CPU back. Without
   // this, an idle BUSY level is indistinguishable from an already-finished
   // waveform in the async completion path.
-  if (!bus.waitForBusyStart(50, " X3_DRF start")) {
+  if (!bus.waitForBusyStart(x3_refresh::BUSY_START_TIMEOUT_MS, " X3_DRF start")) {
     _isScreenOn = false;
     _redRamSynced = false;
     _forceFullSyncNext = true;

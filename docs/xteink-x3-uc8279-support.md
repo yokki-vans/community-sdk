@@ -10,8 +10,9 @@ Build: nothing new — `-DFREEINK_DEVICE_X3=1` links both X3 drivers
 (`FREEINK_DRIVER_UC8253_X3` and `FREEINK_DRIVER_UC8279`); which one runs is
 decided at boot.
 
-**Everything below is written from the UC8279d_B 0.1 datasheet (Dec 2025) and
-is Pending hardware validation — no UC8279 X3 unit has been on the bench yet.**
+The controller setup is based on the UC8279d_B 0.1 datasheet (Dec 2025). The
+FAST path now uses the controller's native PTIN/PTOUT partial mode; controller
+and waveform tuning should still be validated on every new panel batch.
 
 ## Runtime detection
 
@@ -37,17 +38,18 @@ differential refresh — the same paradigm as the UC8253 X3 driver, and a
 near-identical command set (PSR/PON/POF, DTM1 `0x10`, DSP `0x11`, DRF `0x12`,
 DTM2 `0x13`, CDI `0x50`, TRES `0x61`, DSLP `0x07`+`0xA5`).
 
-v1 uses the **factory OTP waveforms** (`PSR REG=0`): the 4K MTP carries 12
+The driver uses the **factory OTP waveforms** (`PSR REG=0`): the 4K MTP carries 12
 temperature-range LUT sets, each with its own frame rate and rail voltages, and
 `TS_AUTO` re-senses temperature before every booster enable — so PWR/PLL/VDCS
 stay at silicon defaults and every refresh is temperature-compensated by the
-controller. Consequences, all **Pending** bench tuning:
+controller.
 
-- Full/Half/Fast currently run the same OTP waveform (likely a full GC-style
-  flash on every page turn). Fast page turns need custom register banks
-  (`REG=1`, commands `0x20`–`0x24`) — note the UC8279 LUT format is
-  **group-based** (7-byte groups, 7 groups per LUT in KW mode), *not* the
-  UC8253's 43-byte format, so the X3's six tuned banks cannot be copied over.
+- FAST updates run between `PTIN`/`PTOUT`, selecting the MTP partial waveform
+  and diffing NEW RAM against the synchronized OLD plane. This avoids the
+  full-screen flash previously seen on every menu move. FULL/HALF updates keep
+  the normal OTP path for cleanup. Custom register banks (`REG=1`, commands
+  `0x20`–`0x24`) are not required for the navigation path; if added later, note
+  that the UC8279 group format differs from UC8253's 43-byte tables.
 - No grayscale yet (`supportsStripGrayscale()` false); the X3 reader's 4-level
   AA path needs UC8279-format gray banks tuned on hardware.
 - TRES is programmed 792×528. The UC8253 X3 init programs VRES=600 (OEM scans
