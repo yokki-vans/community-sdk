@@ -74,19 +74,27 @@ X3DisplayVerdict detectX3DisplayController(uint8_t verBytes[5] = nullptr, uint8_
 // and leaves the pins released; safe to call before FreeInkDisplay::begin().
 enum class DisplayControllerVerdict : uint8_t { PrimaryAssumed, Uc81xxConfirmed, Inconclusive };
 
+// Factory calibration fallback for a live probe that could not establish a
+// stable read.  Xteink uses different screenType values for the two controller
+// families: 1/0x0B identify the UC8179 sibling of SSD1677, while 2/0x0C
+// identify the UC8279 sibling of UC8253.  Keeping this decision pure makes it
+// testable and, critically, prevents an X4 calibration value from selecting an
+// X3 driver (or vice versa).
+inline bool oemScreenTypeMatchesUltraChip(uint8_t screenType, bool x3Family) {
+  return x3Family ? (screenType == 2 || screenType == 0x0C) : (screenType == 1 || screenType == 0x0B);
+}
+
 DisplayControllerVerdict detectXteinkDisplayController(uint8_t verBytes[5] = nullptr, uint8_t* flg = nullptr);
 
 // Convenience: resolve which panel controller this unit carries and, when it is
 // the UltraChip sibling, promote BoardConfig::ACTIVE.displayController to it
 // (SSD1677 -> UC8179, UC8253 -> UC8279) so FreeInkDisplay::begin() selects the
-// matching driver. The decision is made from the live display-bus probe
-// (detectXteinkDisplayController()) — the ground truth for what silicon is
-// actually present. The OEM NVS value (hw_calib/screenType) is read only for
-// diagnostics and logged for cross-reference; it is NOT used to decide, because
-// it is unreliable in the field (a full-flash from another unit overwrites that
-// namespace and can name the wrong panel). Leaves the profile's default
-// controller in place as a per-boot fallback when the probe doesn't confirm an
-// UltraChip part. Returns true iff the controller was promoted. Call before
+// matching driver. A confirmed live display-bus probe is authoritative. If the
+// live read is inconclusive, a family-matching OEM hw_calib/screenType value is
+// accepted as a fallback; values for the other family are rejected, which
+// avoids selecting the wrong driver after a foreign full-flash. Leaves the
+// profile's default controller in place when neither source confirms its
+// UltraChip sibling. Returns true iff the controller was promoted. Call before
 // FreeInkDisplay::begin(). In
 // builds without a probe-capable profile this is a no-op returning false.
 bool applyXteinkDisplayController();

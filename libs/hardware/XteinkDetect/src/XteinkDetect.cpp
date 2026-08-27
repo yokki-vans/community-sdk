@@ -217,10 +217,11 @@ bool readOemScreenType(uint8_t* out) {
   return true;
 }
 
-bool screenTypeIsUltraChip(uint8_t st) { return st == 1 || st == 2 || st == 0x0B || st == 0x0C; }
-
-// Run the display-bus probe and report the verdict with a diagnostic log line.
-bool probeSaysUltraChip() {
+// Run the display-bus probe and report the complete verdict.  Inconclusive is
+// intentionally distinct from a positive default-controller identification:
+// on a just-manufactured X3 the shared display/SD bus can still be settling at
+// first boot, while the preserved factory calibration remains useful evidence.
+DisplayControllerVerdict probeDisplayControllerWithLog() {
   uint8_t ver[5] = {0};
   uint8_t flg = 0;
   const DisplayControllerVerdict v = detectXteinkDisplayController(ver, &flg);
@@ -230,27 +231,32 @@ bool probeSaysUltraChip() {
                   v == DisplayControllerVerdict::Uc81xxConfirmed  ? "UltraChip"
                   : v == DisplayControllerVerdict::PrimaryAssumed ? "default controller"
                                                                   : "inconclusive (default)");
-  return v == DisplayControllerVerdict::Uc81xxConfirmed;
+  return v;
 }
 
 }  // namespace
 
 bool applyXteinkDisplayController() {
-  // Decide from the live display-bus probe — the ground truth. The OEM NVS
-  // hw_calib/screenType is read only for diagnostics: it's unreliable in the
-  // field (a full-flash from another unit overwrites it, so it can name the wrong
-  // panel). Log it — and flag when it disagrees with the probe — but never
-  // decide on it.
   uint8_t screenType = 0;
-  if (readOemScreenType(&screenType)) {
+  const bool haveScreenType = readOemScreenType(&screenType);
+  if (haveScreenType) {
     if (Serial)
-      Serial.printf("[%lu] [XTDET] NVS hw_calib/screenType=%u (%s) [info only]\n", millis(), screenType,
-                    screenTypeIsUltraChip(screenType) ? "UltraChip" : "default");
+      Serial.printf("[%lu] [XTDET] NVS hw_calib/screenType=%u\n", millis(), screenType);
   } else if (Serial) {
-    Serial.printf("[%lu] [XTDET] NVS hw_calib/screenType: not set [info only]\n", millis());
+    Serial.printf("[%lu] [XTDET] NVS hw_calib/screenType: not set\n", millis());
   }
 
-  const bool ultraChip = probeSaysUltraChip();
+  const DisplayControllerVerdict liveVerdict = probeDisplayControllerWithLog();
+  const bool x3Family = BoardConfig::ACTIVE.displayController == BoardConfig::DisplayController::UC8253;
+  const bool supportedFamily =
+      x3Family || BoardConfig::ACTIVE.displayController == BoardConfig::DisplayController::SSD1677;
+  const bool calibratedUltraChip =
+      supportedFamily && haveScreenType && oemScreenTypeMatchesUltraChip(screenType, x3Family);
+  const bool ultraChip = liveVerdict == DisplayControllerVerdict::Uc81xxConfirmed ||
+                         (liveVerdict == DisplayControllerVerdict::Inconclusive && calibratedUltraChip);
+  if (liveVerdict == DisplayControllerVerdict::Inconclusive && calibratedUltraChip && Serial) {
+    Serial.printf("[%lu] [XTDET] live probe inconclusive; using matching OEM screenType fallback\n", millis());
+  }
   if (!ultraChip) return false;
 
   // Promote the profile's default controller to its UltraChip sibling. screenType
