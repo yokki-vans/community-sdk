@@ -133,6 +133,9 @@ class PanelDriver {
   // --- optional, controller-specific hooks (no-op by default) ---
   virtual void requestResync(uint8_t settlePasses) { (void)settlePasses; }
   virtual void skipInitialResync() {}
+  // Content-polarity hint for differential drivers. Dark-background fast
+  // refreshes may need to re-drive unchanged black pixels to prevent residue.
+  virtual void setBackgroundHint(bool darkBackground) { (void)darkBackground; }
   virtual void requestCompleteWaveformNextRefresh() {}
   // Interrupted-refresh cutoff tuning (ED2208: where the gate scan freezes).
   virtual void setFastRefreshCutoffMs(uint16_t ms) { (void)ms; }

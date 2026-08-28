@@ -164,6 +164,7 @@ void FreeInkDisplay::selectDriver() {
 #endif
       break;
   }
+  if (_driver) _driver->setBackgroundHint(_inverted);
 }
 
 bool FreeInkDisplay::begin() {
@@ -284,6 +285,7 @@ void FreeInkDisplay::setInverted(const bool inverted) {
   _inversionDirty = true;
   _shadowValid = false;
   _redRamSynced = false;
+  if (_driver) _driver->setBackgroundHint(inverted);
 }
 
 bool FreeInkDisplay::toggleInverted() {
