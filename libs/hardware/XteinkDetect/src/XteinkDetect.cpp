@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <BoardConfig.h>
 #include <Wire.h>
+#include <driver/gpio.h>
 #include <string.h>
 
 #include "nvs.h"
@@ -36,8 +37,9 @@ struct EpdProbePins {
 };
 
 // UC81xx read-capable registers (UC8179 / UC8279d datasheets, identical layout).
-constexpr uint8_t UC81XX_CMD_VER = 0x70;  // reserved 0x00, CHIP_VER, LUT_VER[23:0]
-constexpr uint8_t UC81XX_CMD_FLG = 0x71;  // status; BUSY_N (D0) = 1 when idle
+constexpr uint8_t UC81XX_CMD_VER = 0x70;   // reserved 0x00, CHIP_VER, LUT_VER[23:0]
+constexpr uint8_t UC81XX_CMD_FLG = 0x71;   // status; BUSY_N (D0) = 1 when idle
+constexpr uint8_t UC81XX_CMD_RMTP = 0xA2;  // dummy byte followed by the controller's MTP contents
 
 inline void epdClockDelay() { delayMicroseconds(1); }  // ~500 kHz, timing-safe
 
@@ -110,7 +112,7 @@ bool matchUc81xx(const uint8_t ver[5], uint8_t flg) {
   return !verIsFloating(ver);
 }
 
-bool runDisplayProbePass(const EpdProbePins& p, uint8_t ver[5], uint8_t* flg) {
+bool runDisplayProbePass(const EpdProbePins& p, uint8_t ver[5], uint8_t* flg, uint8_t rstLowMs) {
   pinMode(p.cs, OUTPUT);
   digitalWrite(p.cs, HIGH);
   pinMode(p.sclk, OUTPUT);
@@ -120,17 +122,19 @@ bool runDisplayProbePass(const EpdProbePins& p, uint8_t ver[5], uint8_t* flg) {
   pinMode(p.mosi, OUTPUT);
   if (p.busy >= 0) pinMode(p.busy, INPUT);
 
-  // Hardware reset pulse (RST_N min low width 50 us; give it 1 ms) then wait a
-  // fixed settle time. We can't trust BUSY polarity here — the controller (and
-  // therefore its idle level) is exactly what we're trying to identify — so we
-  // don't gate on BUSY; a flat delay covers every UC81xx power-up. The panel
-  // driver's own begin() resets again afterwards, so this leaves no state.
+  // Use the vendor's longer identification reset on confirmation passes. Some
+  // UC8279D modules do not answer reliably after the short reset that is enough
+  // for normal panel operation. We cannot trust BUSY polarity here because the
+  // controller is exactly what we are trying to identify.
   if (p.rst >= 0) {
+    // A per-pin hold can survive deep sleep. Detection runs before the display
+    // bus is initialized, so explicitly release it before toggling RESET.
+    gpio_hold_dis(static_cast<gpio_num_t>(p.rst));
     pinMode(p.rst, OUTPUT);
     digitalWrite(p.rst, HIGH);
     delay(2);
     digitalWrite(p.rst, LOW);
-    delay(1);
+    delay(rstLowMs);
     digitalWrite(p.rst, HIGH);
   }
   delay(30);
@@ -152,21 +156,24 @@ void releaseDisplayPins(const EpdProbePins& p) {
   if (p.rst >= 0) pinMode(p.rst, INPUT);
 }
 
-// Three-pass probe with agreement, over an arbitrary pinout. Confirmed only when
-// at least two passes match the UC81xx signature AND agree on the VER bytes — a
-// floating bus can't produce the same stable non-trivial pattern twice. A failed
-// read is never positive evidence of the primary controller: it may be a
-// temporarily unpowered/stuck panel bus, so every non-confirmed result remains
-// Inconclusive and the caller may use (but must not persist) its profile default.
+// Three-pass probe with agreement, over an arbitrary pinout. Most UC81xx parts
+// expose a non-uniform VER response. A field-observed UC8279D revision used in
+// new X3 units instead ships with a blank VER/MTP area: VER reads FF FF FF FF FF
+// even though FLG and RMTP are actively driven. For that revision, require two
+// identical non-uniform RMTP dumps (or the programmed 0xA5 MTP key). A UC8253
+// does not implement RMTP and its floating read cannot satisfy that condition.
+// Every other non-confirmed result remains Inconclusive so a temporary bus fault
+// can never be persisted as a controller decision.
 DisplayControllerVerdict probeDisplayController(const EpdProbePins& p, uint8_t verBytes[5], uint8_t* flg) {
   uint8_t versions[3][5] = {};
   uint8_t flags[3] = {};
   bool passed[3] = {};
+  const bool x3Family = BoardConfig::ACTIVE.displayController == BoardConfig::DisplayController::UC8253;
   for (uint8_t i = 0; i < 3; ++i) {
-    passed[i] = runDisplayProbePass(p, versions[i], &flags[i]);
+    const uint8_t resetLowMs = x3Family && i > 0 ? 50 : 1;
+    passed[i] = runDisplayProbePass(p, versions[i], &flags[i], resetLowMs);
     if (i != 2) delay(5);
   }
-  releaseDisplayPins(p);
 
   uint8_t reportIndex = 0;
   for (uint8_t i = 0; i < 3; ++i) {
@@ -178,15 +185,51 @@ DisplayControllerVerdict probeDisplayController(const EpdProbePins& p, uint8_t v
   if (verBytes) memcpy(verBytes, versions[reportIndex], 5);
   if (flg) *flg = flags[reportIndex];
 
+  bool confirmed = false;
   for (uint8_t i = 0; i < 3; ++i) {
     if (!passed[i]) continue;
     for (uint8_t j = static_cast<uint8_t>(i + 1); j < 3; ++j) {
       if (passed[j] && memcmp(versions[i], versions[j], 5) == 0) {
-        return DisplayControllerVerdict::Uc81xxConfirmed;
+        confirmed = true;
+        break;
       }
     }
+    if (confirmed) break;
   }
-  return DisplayControllerVerdict::Inconclusive;
+
+  // Blank-MTP UC8279D fallback. Require a stable all-FF VER and a driven FLG
+  // before issuing RMTP, then validate that the response is real rather than a
+  // floating pull-up pattern. This is the discriminator used by the upstream
+  // FreeInk driver for the new X3 display revision.
+  if (!confirmed) {
+    int8_t stableIndex = -1;
+    for (uint8_t i = 0; i < 3 && stableIndex < 0; ++i) {
+      const bool flgDriven = flags[i] != 0x00 && flags[i] != 0xFF && (flags[i] & 0x01) == 0x01;
+      if (!flgDriven || versions[i][0] != 0xFF || !verIsFloating(versions[i])) continue;
+      for (uint8_t j = static_cast<uint8_t>(i + 1); j < 3; ++j) {
+        if (flags[j] == flags[i] && memcmp(versions[i], versions[j], 5) == 0) {
+          stableIndex = static_cast<int8_t>(i);
+          break;
+        }
+      }
+    }
+
+    if (stableIndex >= 0) {
+      constexpr size_t MTP_BYTES = 48;
+      uint8_t raw1[MTP_BYTES + 1] = {};
+      uint8_t raw2[MTP_BYTES + 1] = {};
+      epdCmdRead(p, UC81XX_CMD_RMTP, raw1, sizeof(raw1));
+      epdCmdRead(p, UC81XX_CMD_RMTP, raw2, sizeof(raw2));
+      const bool mtpEvidence = uc81xxMtpReadbackIsValid(raw1 + 1, raw2 + 1, MTP_BYTES);
+      confirmed = mtpEvidence;
+      reportIndex = static_cast<uint8_t>(stableIndex);
+      if (verBytes) memcpy(verBytes, versions[reportIndex], 5);
+      if (flg) *flg = flags[reportIndex];
+    }
+  }
+
+  releaseDisplayPins(p);
+  return confirmed ? DisplayControllerVerdict::Uc81xxConfirmed : DisplayControllerVerdict::Inconclusive;
 }
 
 }  // namespace

@@ -19,6 +19,7 @@
 // touch a pin: the probe bus (SDA=20 / SCL=0) is only safe on the Xteink C3
 // pinout — on an ESP32-S3 those are native USB D+ and the boot strap.
 
+#include <stddef.h>
 #include <stdint.h>
 
 namespace freeink {
@@ -82,6 +83,28 @@ enum class DisplayControllerVerdict : uint8_t { PrimaryAssumed, Uc81xxConfirmed,
 // X3 driver (or vice versa).
 inline bool oemScreenTypeMatchesUltraChip(uint8_t screenType, bool x3Family) {
   return x3Family ? (screenType == 2 || screenType == 0x0C) : (screenType == 1 || screenType == 0x0B);
+}
+
+// Validate an RMTP read used to distinguish a blank-MTP UC8279D from a
+// floating UC8253 bus. A programmed controller starts with the unambiguous
+// 0xA5 enable key. Blank-MTP field panels instead expose a stable non-uniform
+// dump, so the complete payload must repeat exactly on a second read.
+inline bool uc81xxMtpReadbackIsValid(const uint8_t* first, const uint8_t* second, size_t length) {
+  if (first == nullptr || length == 0) return false;
+  if (first[0] == 0xA5) return true;
+
+  bool uniform = true;
+  for (size_t i = 1; i < length; ++i) {
+    if (first[i] != first[0]) {
+      uniform = false;
+      break;
+    }
+  }
+  if (uniform || second == nullptr) return false;
+  for (size_t i = 0; i < length; ++i) {
+    if (first[i] != second[i]) return false;
+  }
+  return true;
 }
 
 DisplayControllerVerdict detectXteinkDisplayController(uint8_t verBytes[5] = nullptr, uint8_t* flg = nullptr);
