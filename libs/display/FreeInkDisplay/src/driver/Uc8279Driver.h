@@ -29,6 +29,8 @@
 namespace freeink {
 
 class Uc8279Driver : public PanelDriver {
+  void invalidateRefresh();
+
  public:
   Uc8279Driver();
 

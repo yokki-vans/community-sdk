@@ -5,6 +5,7 @@
 #include <BoardConfig.h>
 
 #include "../lut/Uc8279X3Luts.h"
+#include "X3RefreshPolicy.h"
 
 namespace freeink {
 namespace {
@@ -108,8 +109,16 @@ void Uc8279Driver::initController(EpdBus& bus) {
 
 void Uc8279Driver::begin(EpdBus& bus) {
   bus.reset(50);
+  _pendingRefresh = false;
   _forceFullSyncNext = false;
   initController(bus);
+}
+
+void Uc8279Driver::invalidateRefresh() {
+  _pendingRefresh = false;
+  _isScreenOn = false;
+  _oldPlaneValid = false;
+  _forceFullSyncNext = true;
 }
 
 void Uc8279Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) {
@@ -118,6 +127,7 @@ void Uc8279Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, 
 }
 
 bool Uc8279Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) {
+  _pendingRefresh = false;
   (void)prev;  // single-buffer: DTM1 holds the previous frame from displayFinish()'s sync
   // GC vs DU is ONLY a waveform-bank choice — BOTH diff the new frame against the
   // REAL previous frame in DTM1 (the live stock full path FUN_42015786 loads
@@ -162,16 +172,21 @@ bool Uc8279Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* p
 
   if (!_isScreenOn) {
     bus.cmd(CMD_POWER_ON);
-    bus.waitBusy(" 8279_PON");
+    if (!bus.waitBusy(" 8279_PON")) {
+      invalidateRefresh();
+      return false;
+    }
     _isScreenOn = true;
   }
   bus.cmd(CMD_DISPLAY_REFRESH);
   // Confirm the waveform started (BUSY_N dropped LOW) before returning so
   // displayFinish() only rides out the completion edge.
-  {
-    const int8_t busyPin = bus.pins().busy;
-    const unsigned long t0 = millis();
-    while (digitalRead(busyPin) == HIGH && millis() - t0 < 50) delay(1);
+  // Use the same bounded start handshake as UC8253. The old 50 ms poll
+  // silently proceeded on an idle line; the completion wait then failed and
+  // the facade reinitialized the panel on the following navigation frame.
+  if (!bus.waitForBusyStart(x3_refresh::BUSY_START_TIMEOUT_MS, " 8279_DRF start")) {
+    invalidateRefresh();
+    return false;
   }
   _pendingTurnOff = turnOff;
   _pendingRefresh = true;
@@ -182,7 +197,10 @@ void Uc8279Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
   if (!_pendingRefresh) return;
   _pendingRefresh = false;
 
-  bus.waitRefreshComplete(" 8279_DRF");
+  if (!bus.waitRefreshComplete(" 8279_DRF")) {
+    invalidateRefresh();
+    return;
+  }
   bus.cmd(CMD_VCOM_DATA_INTERVAL);  // restore the later-refresh CDI (border hold)
   bus.data(kUc8279X3_CdiLater);
 
@@ -205,7 +223,10 @@ void Uc8279Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
 
   if (_pendingTurnOff) {
     bus.cmd(CMD_POWER_OFF);
-    bus.waitBusy(" 8279_POF");
+    if (!bus.waitBusy(" 8279_POF")) {
+      invalidateRefresh();
+      return;
+    }
     _isScreenOn = false;
   }
 }
