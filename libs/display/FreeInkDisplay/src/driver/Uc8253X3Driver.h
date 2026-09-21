@@ -66,6 +66,7 @@ class Uc8253X3Driver : public PanelDriver {
   bool displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) override;
   void displayFinish(EpdBus& bus, const uint8_t* fb) override;
   bool supportsAsyncDisplay() const override { return true; }
+  bool needsFrameForFinish() const override { return true; }
 
   bool supportsStripGrayscale() const override { return true; }
   void displayGrayscaleBase(EpdBus& bus, const uint8_t* fb, RefreshMode fallback, bool turnOff) override;
@@ -85,7 +86,7 @@ class Uc8253X3Driver : public PanelDriver {
   void initController(EpdBus& bus);
   void loadBank(EpdBus& bus, const Uc8253LutBank& bank);
   void loadBankCdi(EpdBus& bus, uint8_t cdi0, uint8_t cdi1, const Uc8253LutBank& bank);
-  void triggerRefresh(EpdBus& bus, bool turnOff);
+  bool triggerRefresh(EpdBus& bus, bool turnOff);
 
   const Uc8253X3Config& _cfg;
 

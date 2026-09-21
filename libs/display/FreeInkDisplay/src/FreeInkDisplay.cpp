@@ -631,10 +631,10 @@ void FreeInkDisplay::displayAsyncImpl(RefreshMode mode, bool turnOffScreen, bool
     return;
   }
   // The shadow contract lets the caller redraw the framebuffer immediately —
-  // a panel whose displayFinish() re-reads the frame (X3 DTM1 sync) cannot
+  // a panel whose displayFinish() re-reads the frame (UC82xx/UC8179) cannot
   // honor that; take the blocking path there. Use the noShadow entry (with its
   // frame-intact contract) or triggerDisplay() for X3 overlap.
-  if (_panelSel == PanelSel::X3) {
+  if (_driver->needsFrameForFinish()) {
     displayBuffer(mode, turnOffScreen);
     return;
   }

@@ -45,6 +45,7 @@ class Uc8279Driver : public PanelDriver {
   bool displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) override;
   void displayFinish(EpdBus& bus, const uint8_t* fb) override;
   bool supportsAsyncDisplay() const override { return true; }
+  bool needsFrameForFinish() const override { return true; }
 
   void requestResync(uint8_t settlePasses) override;
   void skipInitialResync() override;
@@ -78,7 +79,7 @@ class Uc8279Driver : public PanelDriver {
   // Load the raw (non-prefixed) 49-byte XTF_AA grayscale bank: 0x20+i then table.
   void loadXtfAa(EpdBus& bus);
   // Blocking PON -> DRF -> wait (-> POF) used by the grayscale paths.
-  void triggerGrayRefresh(EpdBus& bus, bool turnOff);
+  bool triggerGrayRefresh(EpdBus& bus, bool turnOff);
   // Enter the full 792x528 PTL partial window (PTIN + PTL). ALL RAM plane writes
   // and refreshes must run in this window: normal mode addresses the controller's
   // 800x600 frame (100-byte rows) and misaligns our 99-byte-row planes. The B/W

@@ -61,6 +61,9 @@ class PanelDriver {
   // front. Must agree with what displayStart() actually returns.
   virtual bool supportsAsyncDisplay() const { return false; }
 
+  // True when displayFinish needs the submitted pixels to synchronize OLD RAM.
+  virtual bool needsFrameForFinish() const { return false; }
+
   // Two-call refresh split (CrossPoint EInkDisplay::triggerDisplay/completeDisplay).
   // For the shadowed async path the facade passes its own baseline copy as
   // `prev`, so the live fb may be redrawn immediately; otherwise `fb` must

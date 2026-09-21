@@ -81,14 +81,15 @@ void Uc8253X3Driver::loadBankCdi(EpdBus& bus, uint8_t cdi0, uint8_t cdi1, const 
   loadBank(bus, bank);
 }
 
-void Uc8253X3Driver::triggerRefresh(EpdBus& bus, bool turnOff) {
+bool Uc8253X3Driver::triggerRefresh(EpdBus& bus, bool turnOff) {
+  if (!bus.waitHealthy()) return false;
   if (!_isScreenOn) {
     bus.cmd(CMD_POWER_ON);
     if (!bus.waitBusy(" X3_PON")) {
       _isScreenOn = false;
       _redRamSynced = false;
       _forceFullSyncNext = true;
-      return;
+      return false;
     }
     _isScreenOn = true;
   }
@@ -97,13 +98,19 @@ void Uc8253X3Driver::triggerRefresh(EpdBus& bus, bool turnOff) {
     _isScreenOn = false;
     _redRamSynced = false;
     _forceFullSyncNext = true;
-    return;
+    return false;
   }
   if (turnOff) {
     bus.cmd(CMD_POWER_OFF);
-    bus.waitBusy(" X3_POF");
+    if (!bus.waitBusy(" X3_POF")) {
+      _isScreenOn = false;
+      _redRamSynced = false;
+      _forceFullSyncNext = true;
+      return false;
+    }
     _isScreenOn = false;
   }
+  return true;
 }
 
 void Uc8253X3Driver::initController(EpdBus& bus) {
@@ -153,6 +160,7 @@ void Uc8253X3Driver::initController(EpdBus& bus) {
 void Uc8253X3Driver::begin(EpdBus& bus) {
   bus.reset(50);  // X3 needs an extra settle after reset
   _redRamSynced = false;
+  _pendingRefresh = false;
   _initialFullSyncsRemaining = 2;
   _forceFullSyncNext = false;
   _forcedConditionPassesNext = 0;
@@ -168,13 +176,15 @@ void Uc8253X3Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev
 
 bool Uc8253X3Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) {
   (void)prev;
-  if (!_isScreenOn && !turnOff) {
+  if (!_isScreenOn && !turnOff && mode == RefreshMode::Fast) {
     mode = RefreshMode::Half;  // wake transition gets a stronger waveform
   }
   if (_inGrayscaleMode) {
     grayscaleRevert(bus, fb);
+    if (!bus.waitHealthy()) return false;
   }
 
+  if (_grayState.lsbValid) _redRamSynced = false;
   const bool fastMode = (mode == RefreshMode::Fast);
   const bool halfMode = (mode == RefreshMode::Half);
   const bool forcedFullSync = _forceFullSyncNext;
@@ -245,7 +255,12 @@ void Uc8253X3Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
   }
   if (turnOff) {
     bus.cmd(CMD_POWER_OFF);
-    bus.waitBusy(" X3_POF");
+    if (!bus.waitBusy(" X3_POF")) {
+      _isScreenOn = false;
+      _redRamSynced = false;
+      _forceFullSyncNext = true;
+      return;
+    }
     _isScreenOn = false;
   }
 
@@ -270,7 +285,7 @@ void Uc8253X3Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
       bus.cmdData(CMD_PARTIAL_WINDOW, w, 9);
       bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
       bus.cmd(CMD_PARTIAL_OUT);
-      triggerRefresh(bus, false);
+      if (!triggerRefresh(bus, false)) return;
     }
   }
 
@@ -289,7 +304,7 @@ void Uc8253X3Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
   if (doFullSync) {
     loadBankCdi(bus, 0x29, 0x07, _cfg.fast);
     bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
-    triggerRefresh(bus, turnOff);
+    if (!triggerRefresh(bus, turnOff)) return;
     bus.sendPlaneFlipped(CMD_DTM1, fb, _h, _wb);
     bus.cmd(CMD_DATA_STOP);
   }
@@ -318,6 +333,7 @@ void Uc8253X3Driver::displayGrayscaleBase(EpdBus& bus, const uint8_t* fb, Refres
     // and the differential below is valid by construction (white-baseline,
     // the same pattern the full sync uses).
     grayscaleRevert(bus, fb);
+    if (!bus.waitHealthy()) return;
   }
   // _grayState.lsbValid means grayscale planes were written over DTM1/DTM2
   // since the last display — the controller RAM no longer holds the displayed
@@ -327,13 +343,14 @@ void Uc8253X3Driver::displayGrayscaleBase(EpdBus& bus, const uint8_t* fb, Refres
       !_redRamSynced || _grayState.lsbValid || _forceFullSyncNext || _initialFullSyncsRemaining > 0;
   if (cleanBaseNeeded) {
     display(bus, fb, nullptr, fallback, /*turnOff=*/false);
+    if (!bus.waitHealthy()) return;
     loadBankCdi(bus, 0xA9, 0x07, _cfg.preBwMid);
-    triggerRefresh(bus, turnOff);
+    if (!triggerRefresh(bus, turnOff)) return;
     return;
   }
   bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
   loadBankCdi(bus, 0xA9, 0x07, _cfg.preBwMid);
-  triggerRefresh(bus, turnOff);
+  if (!triggerRefresh(bus, turnOff)) return;
   // Keep the driver invariant that DTM1 mirrors the displayed frame; the gray
   // plane writes that normally follow overwrite both planes anyway.
   bus.sendPlaneFlipped(CMD_DTM1, fb, _h, _wb);
@@ -376,7 +393,7 @@ void Uc8253X3Driver::preconditionGrayscale(EpdBus& bus, uint16_t x, uint16_t y, 
   bus.cmd(CMD_PARTIAL_IN);
   bus.cmdData(CMD_PARTIAL_WINDOW, win, 9);
   loadBankCdi(bus, 0xA9, 0x07, _cfg.preBwMid);
-  triggerRefresh(bus, /*turnOff=*/false);
+  if (!triggerRefresh(bus, /*turnOff=*/false)) return;
   bus.cmd(CMD_PARTIAL_OUT);
 }
 
@@ -447,7 +464,7 @@ void Uc8253X3Driver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, c
   } else {
     loadBankCdi(bus, 0x29, 0x07, _cfg.gc);  // OEM 4-level nudge bank
   }
-  triggerRefresh(bus, turnOff);
+  if (!triggerRefresh(bus, turnOff)) return;
 
   _redRamSynced = false;
   _forceFullSyncNext = false;
@@ -456,7 +473,7 @@ void Uc8253X3Driver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, c
 }
 
 void Uc8253X3Driver::cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) {
-  if (!bw) return;
+  if (!bw || !bus.waitHealthy()) return;
   // Rebase both planes from the restored BW buffer (same data to DTM1 + DTM2).
   bus.sendPlaneFlipped(CMD_DTM2, bw, _h, _wb);
   bus.cmd(CMD_DATA_STOP);
@@ -482,7 +499,7 @@ void Uc8253X3Driver::grayscaleRevert(EpdBus& bus, const uint8_t* fb) {
   bus.fillPlane(CMD_DTM2, 0xFF, _h, _wb);
   bus.cmd(CMD_DATA_STOP);
   loadBankCdi(bus, 0xA9, 0x07, _cfg.half);
-  triggerRefresh(bus, false);
+  if (!triggerRefresh(bus, false)) return;
   // Both planes are now all-white (BW-coded), not grayscale planes — clear
   // lsbValid to match, or it stays true forever and forces the cleanBaseNeeded
   // path every page.
@@ -496,8 +513,8 @@ void Uc8253X3Driver::requestResync(uint8_t settlePasses) {
 }
 
 void Uc8253X3Driver::skipInitialResync() {
+  // begin() reset/cleared controller RAM; a retained image is not a baseline.
   _initialFullSyncsRemaining = 0;
-  _redRamSynced = true;
 }
 
 void Uc8253X3Driver::deepSleep(EpdBus& bus) {

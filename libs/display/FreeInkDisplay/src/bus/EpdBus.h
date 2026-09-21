@@ -78,7 +78,10 @@ class EpdBus {
   bool waitForBusyStart(uint32_t timeoutMs = 50, const char* tag = nullptr);
 
   bool waitHealthy() const { return _waitHealthy; }
-  void clearWaitError() { _waitHealthy = true; }
+  void clearWaitError() {
+    _waitHealthy = true;
+    _refreshStartObserved = false;
+  }
 
   // Instantaneous BUSY-pin read for non-blocking refresh polling. X3's
   // two-phase wait can't be captured in a single read; its terminal state is
@@ -130,6 +133,7 @@ class EpdBus {
   BusyPolarity busyPolarity() const { return _busy; }
 
  private:
+  bool waitBusyImpl(BusyPolarity p, const char* tag, bool startObserved);
   // Busy-wait hooks (see setBusyWaitHooks / setBusyWaitSliceHook)
   static constexpr unsigned long BUSY_WAIT_HOOK_THRESHOLD_MS = 20;
   void (*_busyWaitBeginHook)() = nullptr;

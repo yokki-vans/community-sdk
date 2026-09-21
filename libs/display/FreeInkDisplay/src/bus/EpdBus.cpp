@@ -62,6 +62,7 @@ void EpdBus::begin(const EpdPins& pins, uint32_t spiHz, BusyPolarity busy, int8_
 }
 
 void EpdBus::reset(uint16_t extraSettleMs) {
+  _refreshStartObserved = false;
   digitalWrite(_pins.rst, HIGH);
   delay(20);
   digitalWrite(_pins.rst, LOW);
@@ -150,6 +151,7 @@ void EpdBus::rawWriteBytes(const uint8_t* d, uint16_t len) {
 bool EpdBus::waitBusy(const char* tag) { return waitBusy(_busy, tag); }
 
 bool EpdBus::waitForBusyStart(uint32_t timeoutMs, const char* tag) {
+  _refreshStartObserved = false;
   if (_pins.busy < 0) {
     _waitHealthy = false;
     return false;
@@ -170,14 +172,16 @@ bool EpdBus::waitForBusyStart(uint32_t timeoutMs, const char* tag) {
   return false;
 }
 
-bool EpdBus::waitBusy(BusyPolarity p, const char* tag) {
+bool EpdBus::waitBusy(BusyPolarity p, const char* tag) { return waitBusyImpl(p, tag, false); }
+
+bool EpdBus::waitBusyImpl(BusyPolarity p, const char* tag, bool startObserved) {
   const unsigned long start = millis();
   // Both hooks engage lazily, only once the wait has proven long (see
   // setBusyWaitHooks). longWait gates the slice hook independently of the
   // begin hook's presence; hookFired guarantees the end hook is balanced.
   bool longWait = false;
   bool hookFired = false;
-  bool x3SawLow = false;
+  bool x3SawLow = startObserved;
   bool succeeded = true;
 
   if (_pins.busy < 0) {
@@ -202,7 +206,7 @@ bool EpdBus::waitBusy(BusyPolarity p, const char* tag) {
     }
   } else if (p == BusyPolarity::ActiveLow) {
     bool busy = digitalRead(_pins.busy) == LOW;
-    if (!busy) {
+    if (!busy && !startObserved) {
       while (millis() - start < 100) {
         if (digitalRead(_pins.busy) == LOW) {
           busy = true;
@@ -228,7 +232,7 @@ bool EpdBus::waitBusy(BusyPolarity p, const char* tag) {
       } while (digitalRead(_pins.busy) == LOW);
     }
   } else {  // X3TwoPhase: wait for the LOW edge, then wait back to HIGH
-    while (digitalRead(_pins.busy) == HIGH) {
+    while (!startObserved && digitalRead(_pins.busy) == HIGH) {
       delay(1);
       if (millis() - start > 1000) break;
     }
@@ -269,6 +273,11 @@ bool EpdBus::waitBusy(BusyPolarity p, const char* tag) {
 }
 
 bool EpdBus::waitRefreshComplete(const char* tag) {
+  // Consume the start token once, including polling/light-sleep fallbacks.
+  // A split refresh may have finished before its caller rejoins it. Waiting
+  // for a second start edge would report a false failure and discard the frame.
+  bool startObserved = _refreshStartObserved;
+  _refreshStartObserved = false;
   if (_pins.busy < 0) {
     _waitHealthy = false;
     return false;
@@ -283,13 +292,13 @@ bool EpdBus::waitRefreshComplete(const char* tag) {
   // slice hook already delivers GPIO-precise wake, so the ISR path buys these hosts
   // nothing — fall back to the hooked poll.
   if (_busyWaitSliceHook != nullptr) {
-    return waitBusy(tag);
+    return waitBusyImpl(_busy, tag, startObserved);
   }
   // ISR-driven completion wait: sleep the task on a semaphore and wake on the
   // exact BUSY completion edge, instead of polling every 1 ms. Falls back to
   // polling if the semaphore could not be created.
   if (!s_epdRefreshDone) {
-    return waitBusy(tag);
+    return waitBusyImpl(_busy, tag, startObserved);
   }
   // Levels/edge by polarity. X4 (ActiveHigh): working HIGH, done on the HIGH->LOW
   // (FALLING) edge. X3 (X3TwoPhase) / ActiveLow: working LOW, done on the LOW->HIGH
@@ -306,10 +315,10 @@ bool EpdBus::waitRefreshComplete(const char* tag) {
   // refresh was a no-op or already finished, and the fast path handles it. This
   // is a no-op for X3 (displayStart already drove BUSY to LOW) and ~instant for
   // X4 (SSD1677 asserts BUSY within microseconds of MASTER_ACTIVATION).
-  {
+  if (!startObserved) {
     const unsigned long c0 = millis();
     while (digitalRead(_pins.busy) != workingLevel && millis() - c0 < 50) delay(1);
-    if (digitalRead(_pins.busy) == workingLevel) _refreshStartObserved = true;
+    if (digitalRead(_pins.busy) == workingLevel) startObserved = true;
   }
 
   xSemaphoreTake(s_epdRefreshDone, 0);  // drain any stale token
@@ -322,7 +331,7 @@ bool EpdBus::waitRefreshComplete(const char* tag) {
   if (digitalRead(_pins.busy) == doneLevel) {
     detachInterrupt(digitalPinToInterrupt(_pins.busy));
     xSemaphoreTake(s_epdRefreshDone, 0);
-    const bool succeeded = _refreshStartObserved;
+    const bool succeeded = startObserved;
     _refreshStartObserved = false;
     if (!succeeded) {
       _waitHealthy = false;
