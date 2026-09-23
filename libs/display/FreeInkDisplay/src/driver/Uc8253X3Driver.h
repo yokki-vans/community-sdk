@@ -82,6 +82,10 @@ class Uc8253X3Driver : public PanelDriver {
   void requestResync(uint8_t settlePasses) override;
   void skipInitialResync() override;
 
+  const char* driverName() const override { return "UC8253"; }
+  const char* lastWaveform() const override { return _lastWave; }
+  int traceState(char* buf, int len) const override;
+
  private:
   void initController(EpdBus& bus);
   void loadBank(EpdBus& bus, const Uc8253LutBank& bank);
@@ -115,6 +119,7 @@ class Uc8253X3Driver : public PanelDriver {
   bool _pendingTurnOff = false;
   bool _pendingDoFullSync = false;
   bool _pendingFastMode = false;
+  const char* _lastWave = "";
 };
 
 PanelDriver& uc8253X3Driver();

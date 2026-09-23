@@ -1,4 +1,5 @@
 #include "Uc8253X3Driver.h"
+#include <cstdio>
 
 #include <BoardConfig.h>
 
@@ -176,7 +177,13 @@ void Uc8253X3Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev
 
 bool Uc8253X3Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) {
   (void)prev;
-  if (!_isScreenOn && !turnOff && mode == RefreshMode::Fast) {
+  // Only an unknown-baseline wake gets the stronger waveform. When the
+  // previous frame completed cleanly (DTM1 still holds it — e.g. a fade-fix
+  // power-down between frames, or any wake where _redRamSynced survived),
+  // promoting Fast to Half scrubbed the whole panel and added the 200 ms
+  // settle on EVERY navigation: the X3-only "menu blinks and feels laggy"
+  // symptom, while the X4 drivers stayed on their fast path.
+  if (!_isScreenOn && !turnOff && mode == RefreshMode::Fast && !_redRamSynced) {
     mode = RefreshMode::Half;  // wake transition gets a stronger waveform
   }
   if (_inGrayscaleMode) {
@@ -194,23 +201,35 @@ bool Uc8253X3Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
   _grayState.lastBaseWasPartial = !doFullSync;
 
   if (doFullSync) {
+    _lastWave = "full";
     // _full OEM bank from a white DTM1 baseline (no software prev-frame buffer).
     loadBankCdi(bus, 0x29, 0x07, _cfg.full);
     bus.fillPlane(CMD_DTM1, 0xFF, _h, _wb);
     bus.cmd(CMD_DATA_STOP);
     bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
   } else if (doHalfSync) {
+    _lastWave = "half";
     // _half scrub: WW==BW, WB==BB -> drive every pixel to target ignoring DTM1.
     loadBankCdi(bus, 0xA9, 0x07, _cfg.half);
     bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
   } else {
+    _lastWave = "fast";
     // _fast turbo differential; DTM1 retains the previous frame.
     loadBankCdi(bus, 0x29, 0x07, _cfg.fast);
     bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
   }
 
-  // doFullSync re-powers the charge pump even if already on (higher current).
-  if (!_isScreenOn || doFullSync) {
+  // PON ONLY when the panel is actually off. The old `|| doFullSync` clause
+  // re-issued PON on every full sync "to re-power the charge pump", but on
+  // UC8253 units PON while the pump is already running never toggles BUSY:
+  // the wait times out at 1 s, the facade recovers with a full controller
+  // reinit, and the retried frame runs a full waveform — a black blink plus
+  // ~3.1 s of input lag on EVERY keypress, forever (recovery resets the
+  // initial-full budget so it never drains). Field trace caught it verbatim:
+  //   EPD ... a=0 ok=0 tag= X3_PON t=1051 → recovery → retry full t=3095
+  // The UC8279 sibling already skips PON while on and runs GC waveforms
+  // pump-on; full waveforms likewise do not need a power cycle.
+  if (!_isScreenOn) {
     bus.cmd(CMD_POWER_ON);
     if (!bus.waitBusy(" X3_PON")) {
       _isScreenOn = false;
@@ -225,9 +244,14 @@ bool Uc8253X3Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
   // this, an idle BUSY level is indistinguishable from an already-finished
   // waveform in the async completion path.
   if (!bus.waitForBusyStart(x3_refresh::BUSY_START_TIMEOUT_MS, " X3_DRF start")) {
-    _isScreenOn = false;
-    _redRamSynced = false;
-    _forceFullSyncNext = true;
+    // No start edge within the whole bound means no waveform ran: the panel
+    // still shows the previous frame and DTM1 still holds its baseline.
+    // Deliberately keep _isScreenOn/_redRamSynced/_forceFullSyncNext — poisoning
+    // them here forced every slow-start frame into a full scrub + 200 ms settle
+    // (black blink + lag per keypress) and re-armed a redundant PON next frame.
+    // The facade clears the sticky wait error and softly re-issues the same
+    // fast frame; a genuine fault still escalates through invalidateDisplayState().
+    _pendingRefresh = false;
     return false;
   }
   _pendingTurnOff = turnOff;
@@ -510,6 +534,14 @@ void Uc8253X3Driver::grayscaleRevert(EpdBus& bus, const uint8_t* fb) {
 void Uc8253X3Driver::requestResync(uint8_t settlePasses) {
   _forceFullSyncNext = true;
   _forcedConditionPassesNext = settlePasses;
+}
+
+int Uc8253X3Driver::traceState(char* buf, int len) const {
+  if (!buf || len <= 0) return 0;
+  return snprintf(buf, len, "on=%d sync=%d force=%d init=%u lsb=%d gray=%d pend=%d",
+                  _isScreenOn ? 1 : 0, _redRamSynced ? 1 : 0, _forceFullSyncNext ? 1 : 0,
+                  static_cast<unsigned>(_initialFullSyncsRemaining), _grayState.lsbValid ? 1 : 0,
+                  _inGrayscaleMode ? 1 : 0, _pendingRefresh ? 1 : 0);
 }
 
 void Uc8253X3Driver::skipInitialResync() {

@@ -145,6 +145,17 @@ class PanelDriver {
   virtual uint16_t fastRefreshCutoffMs() const { return 0; }
   virtual void grayscaleRevert(EpdBus& bus, const uint8_t* fb) { (void)bus; (void)fb; }
   virtual void setCustomLut(EpdBus& bus, bool enabled, const unsigned char* data) { (void)bus; (void)enabled; (void)data; }
+
+  // --- field diagnostics (no-op defaults; X3 drivers override) ---
+  // Identity of the controller implementation actually running (probed at boot).
+  virtual const char* driverName() const { return "?"; }
+  // Waveform bank the last displayStart() chose ("fast"/"half"/"full", "DU"/"GC").
+  virtual const char* lastWaveform() const { return ""; }
+// One-line snapshot of the driver's refresh-state flags for EpdTrace.
+virtual int traceState(char* buf, int len) const {
+    if (buf && len > 0) buf[0] = '\0';
+    return 0;
+  }
 };
 
 }  // namespace freeink

@@ -152,8 +152,10 @@ bool EpdBus::waitBusy(const char* tag) { return waitBusy(_busy, tag); }
 
 bool EpdBus::waitForBusyStart(uint32_t timeoutMs, const char* tag) {
   _refreshStartObserved = false;
+  _startTimeoutSeen = false;
   if (_pins.busy < 0) {
     _waitHealthy = false;
+    _lastFailTag = tag ? tag : "wait";
     return false;
   }
   const int workingLevel = _busy == BusyPolarity::ActiveHigh ? HIGH : LOW;
@@ -165,6 +167,8 @@ bool EpdBus::waitForBusyStart(uint32_t timeoutMs, const char* tag) {
   }
 
   _waitHealthy = false;
+  _lastFailTag = tag ? tag : "wait";
+  _startTimeoutSeen = true;
   if (Serial) {
     Serial.printf("[%lu]   EPD BUSY did not start: %s (%lu ms)\n", millis(), tag ? tag : "(untagged)",
                   millis() - started);
@@ -186,6 +190,7 @@ bool EpdBus::waitBusyImpl(BusyPolarity p, const char* tag, bool startObserved) {
 
   if (_pins.busy < 0) {
     _waitHealthy = false;
+    _lastFailTag = tag ? tag : "wait";
     return false;
   }
 
@@ -260,6 +265,7 @@ bool EpdBus::waitBusyImpl(BusyPolarity p, const char* tag, bool startObserved) {
 
   if (!succeeded) {
     _waitHealthy = false;
+    _lastFailTag = tag ? tag : "wait";
     if (Serial) {
       Serial.printf("[%lu]   EPD BUSY failure: %s (%lu ms)\n", millis(), tag ? tag : "(untagged)", millis() - start);
     }
@@ -280,6 +286,7 @@ bool EpdBus::waitRefreshComplete(const char* tag) {
   _refreshStartObserved = false;
   if (_pins.busy < 0) {
     _waitHealthy = false;
+    _lastFailTag = tag ? tag : "wait";
     return false;
   }
   // A host that installed a busy-wait slice hook (e.g. CrossPoint light-sleeping
@@ -335,6 +342,7 @@ bool EpdBus::waitRefreshComplete(const char* tag) {
     _refreshStartObserved = false;
     if (!succeeded) {
       _waitHealthy = false;
+      _lastFailTag = tag ? tag : "wait";
       if (Serial) {
         Serial.printf("[%lu]   EPD refresh never started: %s\n", millis(), tag ? tag : "(untagged)");
       }
@@ -352,6 +360,7 @@ bool EpdBus::waitRefreshComplete(const char* tag) {
   _refreshStartObserved = false;
   if (!succeeded) {
     _waitHealthy = false;
+    _lastFailTag = tag ? tag : "wait";
     if (Serial) {
       Serial.printf("[%lu]   EPD refresh timeout: %s (%lu ms)\n", millis(), tag ? tag : "(untagged)", millis() - start);
     }

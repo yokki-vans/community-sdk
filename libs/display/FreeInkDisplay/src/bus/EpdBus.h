@@ -78,9 +78,19 @@ class EpdBus {
   bool waitForBusyStart(uint32_t timeoutMs = 50, const char* tag = nullptr);
 
   bool waitHealthy() const { return _waitHealthy; }
+  // True when the sticky wait error came from waitForBusyStart() timing out
+  // with BUSY never entering its working level — i.e. no waveform ran.  Lets
+  // the facade soft-retry the same frame without reinitializing the controller
+  // (and without escalating to a forced strong waveform).
+  bool lastWaitFailedAtStart() const { return _startTimeoutSeen; }
+  // Tag of the operation that most recently latched the wait error (static
+  // literal from the caller, e.g. " X3_DRF start"); null while healthy.
+  const char* lastWaitFailTag() const { return _lastFailTag; }
   void clearWaitError() {
     _waitHealthy = true;
     _refreshStartObserved = false;
+    _startTimeoutSeen = false;
+    _lastFailTag = nullptr;
   }
 
   // Instantaneous BUSY-pin read for non-blocking refresh polling. X3's
@@ -156,6 +166,8 @@ class EpdBus {
   int8_t _coCs = -1;
   bool _waitHealthy = true;
   bool _refreshStartObserved = false;
+  bool _startTimeoutSeen = false;
+  const char* _lastFailTag = nullptr;
 };
 
 }  // namespace freeink

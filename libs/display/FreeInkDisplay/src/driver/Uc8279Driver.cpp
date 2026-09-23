@@ -1,4 +1,5 @@
 #include "Uc8279Driver.h"
+#include <cstdio>
 
 #include <Arduino.h>
 
@@ -186,6 +187,7 @@ bool Uc8279Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* p
   bus.cmd(CMD_VCOM_DATA_INTERVAL);
   bus.data(_firstRefresh ? kUc8279X3_CdiFirst : kUc8279X3_CdiLater);
   loadBank(bus, useGc ? kUc8279X3_BwGc : kUc8279X3_BwDu);
+  _lastWave = useGc ? "GC" : "DU";
   _pendingUsedGc = useGc;
 
   if (!_isScreenOn) {
@@ -203,7 +205,11 @@ bool Uc8279Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* p
   // silently proceeded on an idle line; the completion wait then failed and
   // the facade reinitialized the panel on the following navigation frame.
   if (!bus.waitForBusyStart(x3_refresh::BUSY_START_TIMEOUT_MS, " 8279_DRF start")) {
-    invalidateRefresh();
+    // No start edge within the bound = no waveform ran: the OLD plane still
+    // matches the panel. Keep _oldPlaneValid/_forceFullSyncNext so a soft
+    // retry of the same frame stays on the fast DU path instead of being
+    // escalated to a GC scrub (black blink + lag) on every slow-start frame.
+    // Real faults still go through the facade's invalidateDisplayState().
     return false;
   }
   _pendingTurnOff = turnOff;
@@ -254,6 +260,14 @@ void Uc8279Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
 void Uc8279Driver::requestResync(uint8_t settlePasses) {
   (void)settlePasses;
   _forceFullSyncNext = true;  // next refresh uses GC and the available baseline
+}
+
+int Uc8279Driver::traceState(char* buf, int len) const {
+  if (!buf || len <= 0) return 0;
+  return snprintf(buf, len, "on=%d old=%d force=%d init=%u lsb=%d first=%d gray=%d pend=%d",
+                  _isScreenOn ? 1 : 0, _oldPlaneValid ? 1 : 0, _forceFullSyncNext ? 1 : 0,
+                  static_cast<unsigned>(_initialFullsRemaining), _lsbValid ? 1 : 0,
+                  _firstRefresh ? 1 : 0, _inGrayscaleMode ? 1 : 0, _pendingRefresh ? 1 : 0);
 }
 
 void Uc8279Driver::skipInitialResync() {
