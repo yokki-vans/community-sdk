@@ -4,6 +4,8 @@
 #include <BoardConfig.h>
 #include <string.h>
 
+#include "X3RefreshPolicy.h"
+
 namespace freeink {
 namespace {
 // UC8179 command set (UC8179 datasheet + OEM UC8179_800x480 stream, via Ghidra).
@@ -120,6 +122,9 @@ void Uc8179Driver::initController(EpdBus& bus) {
 
 void Uc8179Driver::begin(EpdBus& bus) {
   bus.reset(50);
+  _pendingRefresh = false;
+  _oldPlaneValid = false;
+  _needFullClear = true;
   initController(bus);
 }
 
@@ -141,9 +146,10 @@ void Uc8179Driver::streamPlane(EpdBus& bus, uint8_t ramCmd, const uint8_t* fb) {
 }
 
 bool Uc8179Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) {
+  _pendingRefresh = false;
   (void)prev;
-  // Full OTP flash on an explicit Full request or the forced first-clear;
-  // otherwise a DIFFERENTIAL partial refresh (PTIN/PTOUT). Fast additionally uses
+  // Full OTP flash for Full/Half requests or an invalid baseline;
+  // Fast uses a DIFFERENTIAL partial refresh (PTIN/PTOUT) and
   // the frame-rate lever (E5=0x5A + 0x03/0xE1) that shortens the waveform.
   //
   // GHOSTING FIX: the OLD plane (0x10) MUST hold the PREVIOUS displayed frame for
@@ -152,7 +158,7 @@ bool Uc8179Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* p
   // KW (black->white) NEVER runs and last page's text is never erased = heavy
   // ghosting. Feeding the previous frame lets KW clear it. (0x10 is synced to the
   // just-displayed frame in displayFinish; a full refresh reseeds it to white.)
-  const bool fast = (mode != RefreshMode::Full) && !_needFullClear && _oldPlaneValid;
+  const bool fast = (mode == RefreshMode::Fast) && !_needFullClear && _oldPlaneValid;
 
   // NEW plane (0x13) = new frame.
   streamPlane(bus, CMD_DTM2, fb);
@@ -199,7 +205,7 @@ bool Uc8179Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* p
 
   if (fast) bus.cmd(CMD_PARTIAL_IN);  // PTIN — whole-panel partial (no 0x90 window)
   bus.cmd(CMD_DISPLAY_REFRESH);
-  if (!bus.waitForBusyStart(50, " 8179_DRF start")) {
+  if (!bus.waitForBusyStart(x3_refresh::BUSY_START_TIMEOUT_MS, " 8179_DRF start")) {
     _isScreenOn = false;
     _oldPlaneValid = false;
     _needFullClear = true;

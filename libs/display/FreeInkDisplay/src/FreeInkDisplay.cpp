@@ -1,5 +1,14 @@
 #include "FreeInkDisplay.h"
 
+// Optional field-trace sink (INKPOINTX_DEVICE_QA builds): consumers that
+// enable the flag must link a definition (InkPointX provides
+// src/util/EpdTrace.cpp); other SDK consumers never reference the symbol.
+#if defined(INKPOINTX_DEVICE_QA)
+namespace EpdTrace {
+void log(const char* line);
+}  // namespace EpdTrace
+#endif
+
 #include <BoardConfig.h>
 
 #include <cstring>
@@ -564,40 +573,94 @@ void FreeInkDisplay::displayBuffer(RefreshMode mode, bool turnOffScreen) {
 #if defined(SSD1677_PROBE_DEBUG) && SSD1677_PROBE_DEBUG
   Serial.printf("[EPD] displayBuffer mode=%d off=%d\n", (int)mode, (int)turnOffScreen);
 #endif
-  syncPendingAsync();
-  if (!ensureBusReady()) return;
-  if (_inversionDirty && mode == FAST_REFRESH) {
-    mode = HALF_REFRESH;
-  }
-#ifdef EINK_DISPLAY_SINGLE_BUFFER_MODE
-  if (_inverted) invertBytes(frameBuffer, bufferSize);
-  _driver->display(_bus, frameBuffer, nullptr, toInternal(mode), turnOffScreen);
-  if (_inverted) invertBytes(frameBuffer, bufferSize);
-  // The blocking path resynced the controller's baseline from the live
-  // framebuffer; the async shadow no longer matches what is displayed.
-  _shadowValid = false;
-#else
-  const RefreshMode effMode = resolveReleasedMode(mode);
-  uint8_t* const next = frameBuffer;
-  const uint8_t* const prev = consumePrevFrameFor(effMode);
-  if (_inverted) {
-    invertBytes(next, bufferSize);
-    invertBytes(const_cast<uint8_t*>(prev), bufferSize);
-  }
-  _driver->display(_bus, next, prev, toInternal(effMode), turnOffScreen);
-  if (_inverted) {
-    invertBytes(next, bufferSize);
-    invertBytes(const_cast<uint8_t*>(prev), bufferSize);
-  }
-  if (_bus.waitHealthy()) swapBuffers();
+#if defined(INKPOINTX_DEVICE_QA)
+  const unsigned long traceT0 = millis();
 #endif
-  if (!_bus.waitHealthy()) {
-    invalidateDisplayState();
+  // Submission cycles:
+  //  - attempt 0: the normal request.
+  //  - one SOFT retry: after a BUSY start timeout with the panel demonstrably
+  //    idle (no waveform ever ran), clear the sticky wait error and re-issue
+  //    the SAME request without reinitializing the controller. Driver baseline
+  //    state stays synced, so the retry remains a fast differential frame
+  //    instead of escalating into a forced strong waveform — the per-keypress
+  //    black scrub + lag seen when slow start edges tripped the old fail path.
+  //  - remaining attempts: hard recovery (invalidate + ensureBusReady()'s
+  //    begin() + strong clean path). A first-attempt BUSY failure used to
+  //    return silently with the previous frame still on the panel until the
+  //    next keypress ("boot logo stays until I press a button"); the recovery
+  //    cycle pushes the frame regardless.
+  bool softUsed = false;
+  for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+    syncPendingAsync();
+    if (!ensureBusReady()) {
+      if (attempt < 2) {
+        delay(50);
+        continue;
+      }
+      return;
+    }
+    if (_inversionDirty && mode == FAST_REFRESH) {
+      mode = HALF_REFRESH;
+    }
+#ifdef EINK_DISPLAY_SINGLE_BUFFER_MODE
+    if (_inverted) invertBytes(frameBuffer, bufferSize);
+    _driver->display(_bus, frameBuffer, nullptr, toInternal(mode), turnOffScreen);
+    if (_inverted) invertBytes(frameBuffer, bufferSize);
+    // The blocking path resynced the controller's baseline from the live
+    // framebuffer; the async shadow no longer matches what is displayed.
+    _shadowValid = false;
+#else
+    const RefreshMode effMode = resolveReleasedMode(mode);
+    uint8_t* const next = frameBuffer;
+    const uint8_t* const prev = consumePrevFrameFor(effMode);
+    if (_inverted) {
+      invertBytes(next, bufferSize);
+      invertBytes(const_cast<uint8_t*>(prev), bufferSize);
+    }
+    _driver->display(_bus, next, prev, toInternal(effMode), turnOffScreen);
+    if (_inverted) {
+      invertBytes(next, bufferSize);
+      invertBytes(const_cast<uint8_t*>(prev), bufferSize);
+    }
+    if (_bus.waitHealthy()) swapBuffers();
+#endif
+#if defined(INKPOINTX_DEVICE_QA)
+    {
+      char stBuf[128] = "";
+      if (_driver) _driver->traceState(stBuf, sizeof(stBuf));
+      char ln[256];
+      snprintf(ln, sizeof(ln), "EPD d=%s w=%s m=%d a=%u soft=%d inv=%d ok=%d tag=%s t=%lu | %s",
+               _driver ? _driver->driverName() : "?", _driver ? _driver->lastWaveform() : "",
+               (int)mode, (unsigned)attempt, softUsed ? 1 : 0, _inversionDirty ? 1 : 0,
+               _bus.waitHealthy() ? 1 : 0,
+               (!_bus.waitHealthy() && _bus.lastWaitFailTag()) ? _bus.lastWaitFailTag() : "-",
+               millis() - traceT0, stBuf);
+      EpdTrace::log(ln);
+    }
+#endif  // INKPOINTX_DEVICE_QA
+    if (!_bus.waitHealthy()) {
+      // Soft retry only when the start handshake timed out with BUSY idle:
+      // no waveform ran, controller RAM still matches the panel, so re-issuing
+      // the same frame needs no reinit (and must not trigger one — that was
+      // the forced black scrub on every slow-start navigation frame).
+      if (!softUsed && _bus.lastWaitFailedAtStart() && !_bus.isBusy()) {
+        softUsed = true;
+        _bus.clearWaitError();
+        delay(50);
+        continue;
+      }
+      invalidateDisplayState();
+      if (attempt < 2) {
+        delay(50);
+        continue;
+      }
+      return;
+    }
+    _inversionDirty = false;
+    // X4 re-seeds RED from the displayed frame inside display(); X3 has no RED plane.
+    if (_panelSel != PanelSel::X3) _redRamSynced = true;
     return;
   }
-  _inversionDirty = false;
-  // X4 re-seeds RED from the displayed frame inside display(); X3 has no RED plane.
-  if (_panelSel != PanelSel::X3) _redRamSynced = true;
 }
 
 void FreeInkDisplay::displayBufferAsync(RefreshMode mode) { displayAsyncImpl(mode, /*turnOffScreen=*/false); }
@@ -631,10 +694,10 @@ void FreeInkDisplay::displayAsyncImpl(RefreshMode mode, bool turnOffScreen, bool
     return;
   }
   // The shadow contract lets the caller redraw the framebuffer immediately —
-  // a panel whose displayFinish() re-reads the frame (X3 DTM1 sync) cannot
+  // a panel whose displayFinish() re-reads the frame (UC82xx/UC8179) cannot
   // honor that; take the blocking path there. Use the noShadow entry (with its
   // frame-intact contract) or triggerDisplay() for X3 overlap.
-  if (_panelSel == PanelSel::X3) {
+  if (_driver->needsFrameForFinish()) {
     displayBuffer(mode, turnOffScreen);
     return;
   }

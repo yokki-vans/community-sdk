@@ -29,6 +29,8 @@
 namespace freeink {
 
 class Uc8279Driver : public PanelDriver {
+  void invalidateRefresh();
+
  public:
   Uc8279Driver();
 
@@ -43,9 +45,15 @@ class Uc8279Driver : public PanelDriver {
   bool displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) override;
   void displayFinish(EpdBus& bus, const uint8_t* fb) override;
   bool supportsAsyncDisplay() const override { return true; }
+  bool needsFrameForFinish() const override { return true; }
 
   void requestResync(uint8_t settlePasses) override;
   void skipInitialResync() override;
+
+  const char* driverName() const override { return "UC8279"; }
+  const char* lastWaveform() const override { return _lastWave; }
+  int traceState(char* buf, int len) const override;
+
   // Inverted (dark-background) content: fast refreshes rewrite the OLD plane
   // as the complement of the target so every pixel is re-driven toward its
   // target each update. See displayStart().
@@ -76,7 +84,7 @@ class Uc8279Driver : public PanelDriver {
   // Load the raw (non-prefixed) 49-byte XTF_AA grayscale bank: 0x20+i then table.
   void loadXtfAa(EpdBus& bus);
   // Blocking PON -> DRF -> wait (-> POF) used by the grayscale paths.
-  void triggerGrayRefresh(EpdBus& bus, bool turnOff);
+  bool triggerGrayRefresh(EpdBus& bus, bool turnOff);
   // Enter the full 792x528 PTL partial window (PTIN + PTL). ALL RAM plane writes
   // and refreshes must run in this window: normal mode addresses the controller's
   // 800x600 frame (100-byte rows) and misaligns our 99-byte-row planes. The B/W
@@ -94,6 +102,7 @@ class Uc8279Driver : public PanelDriver {
   bool _firstRefresh = true;   // CDI 0x97 on the first refresh after init, 0xD7 after
   bool _oldPlaneValid = false; // DTM1 holds a real previous frame (differential baseline)
   bool _forceFullSyncNext = false;
+  const char* _lastWave = "";
   // Boot initial-full budget: force GC (strong clear) for this many content
   // paints after begin(), so the first screen after the splash is a real clear
   // even though CrossPoint requests it as FAST. Matches the UC8253 X3 sibling.
